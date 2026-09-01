@@ -1,0 +1,26 @@
+plugins {
+  id 'java'
+  id 'org.springframework.boot' version '3.5.16'
+  id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.orisenc'
+version = '0.1.0-SNAPSHOT'
+description = 'Workflow and Task Management microservice'
+
+java {
+  toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
+dependencies {
+  implementation 'com.orisenc:orisenc-security-spring-boot-starter:1.2.0'
+
+  implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+  runtimeOnly 'org.postgresql:postgresql'
+
+  testImplementation 'org.springframework.boot:spring-boot-starter-test'
+  testImplementation 'org.assertj:assertj-core'
+  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(Test).configureEach { useJUnitPlatform() }

@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: workflow-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/workflow}
+    username: ${SPRING_DATASOURCE_USERNAME:orisenc}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update}
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+server:
+  port: ${SERVER_PORT:8087}
+  servlet:
+    context-path: /workflow-service/ws
+
+orisenc:
+  security:
+    tenant-id: ${ORISENC_TENANT_ID:}
+    client-id: ${ORISENC_CLIENT_ID:}
+    authority: https://login.microsoftonline.com
+    allowed-clock-skew: 60s
+    allowed-origins:
+      - http://localhost:3000
+  authorization:
+    base-url: ${ORISENC_AUTHORIZATION_BASE_URL:http://localhost:8080/common-platform-service/ws}
+    cache-ttl: 5m
+
+logging:
+  level:
+    root: WARN
+    com.orisenc: DEBUG
+    # Why a token was refused - named check by check, rather than the constant "invalid token"
+    # the response deliberately carries. See TokenDiagnosticsConfiguration.
+    com.orisenc.workflow.security.audit: WARN

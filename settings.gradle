@@ -1,0 +1,24 @@
+pluginManagement {
+  repositories {
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
+dependencyResolutionManagement {
+  repositories {
+    mavenLocal()
+    mavenCentral()
+    maven {
+      name = 'GitHubPackages'
+      url = uri('https://maven.pkg.github.com/adminorisenc/platform-be')
+      credentials {
+        username = providers.gradleProperty('gpr.user').orElse(providers.environmentVariable('GITHUB_ACTOR')).getOrNull()
+        password = providers.gradleProperty('gpr.key').orElse(providers.environmentVariable('GITHUB_TOKEN')).getOrNull()
+      }
+      content { includeGroup 'com.orisenc' }
+    }
+  }
+}
+
+rootProject.name = 'workflow-service'
