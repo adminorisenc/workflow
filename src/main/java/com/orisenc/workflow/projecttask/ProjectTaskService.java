@@ -8,6 +8,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -48,6 +49,11 @@ public class ProjectTaskService {
   private final EntityManager entityManager;
   private final Clock clock;
 
+  // Two constructors: this one for Spring, the package-private one below for tests that need a
+  // fixed Clock. Without @Autowired Spring cannot choose between them, falls back to looking for
+  // a no-arg constructor, and the context fails to start with "No default constructor found" -
+  // a failure no unit test can see, because tests call the other constructor directly.
+  @Autowired
   public ProjectTaskService(EntityManager entityManager) {
     this(entityManager, Clock.systemUTC());
   }

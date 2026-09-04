@@ -4,15 +4,20 @@ import jakarta.persistence.*;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @Entity
 @Table(name = "workflow_task", indexes = {
+    @Index(name = "idx_workflow_task_org_status", columnList = "organization_id,status"),
     @Index(name = "idx_workflow_task_assignee_status", columnList = "assignee,status"),
     @Index(name = "idx_workflow_task_department_due", columnList = "department,due_at")
 })
 public class TaskEntity {
   @Id @Column(length = 40) private String id;
   @Version private long version;
+  @Column(name = "organization_id") private UUID organizationId;
+  @Column(name = "customer_id") private UUID customerId;
+  @Column(name = "vendor_id") private UUID vendorId;
   @Column(nullable = false, length = 160) private String title;
   @Column(nullable = false, length = 120) private String reference;
   @Column(nullable = false, length = 60) private String department;
@@ -42,10 +47,20 @@ public class TaskEntity {
   }
   public void assignTo(String actor) { assignee = actor; }
   public void transition(TaskStatus newStatus, Instant time) { status = newStatus; if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.REJECTED) completedAt = time; }
-  public String getId(){return id;} public long getVersion(){return version;} public String getTitle(){return title;}
+  public String getId(){return id;} public long getVersion(){return version;} public UUID getOrganizationId(){return organizationId;}
+  public UUID getCustomerId(){return customerId;} public UUID getVendorId(){return vendorId;} public String getTitle(){return title;}
   public String getReference(){return reference;} public String getDepartment(){return department;} public TaskType getType(){return type;}
   public TaskPriority getPriority(){return priority;} public TaskStatus getStatus(){return status;} public String getRequester(){return requester;}
   public String getAssignee(){return assignee;} public String getSummary(){return summary;} public String getRequestValue(){return requestValue;}
   public Instant getCreatedAt(){return createdAt;} public Instant getDueAt(){return dueAt;} public Instant getCompletedAt(){return completedAt;}
   public List<TaskHistoryEntity> getHistory(){return List.copyOf(history);}
+
+  public void linkToMaster(UUID organizationId, UUID customerId, UUID vendorId) {
+    if (organizationId == null) throw new IllegalArgumentException("Organization id is required.");
+    if (customerId != null && vendorId != null)
+      throw new IllegalArgumentException("A workflow task cannot reference both a customer and a vendor.");
+    this.organizationId = organizationId;
+    this.customerId = customerId;
+    this.vendorId = vendorId;
+  }
 }
