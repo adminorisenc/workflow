@@ -3,7 +3,12 @@ package com.orisenc.workflow.task;
 import static com.orisenc.workflow.task.TaskDtos.*;
 
 import com.orisenc.workflow.api.ApiException;
+import com.orisenc.workflow.delegation.DelegationService;
+import com.orisenc.workflow.delegation.DelegationTarget;
+import com.orisenc.workflow.notify.WorkItemNotification;
+import com.orisenc.workflow.sla.SlaFamily;
 import jakarta.persistence.EntityManager;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -22,10 +27,15 @@ import java.util.UUID;
 public class TaskService {
 
   private final EntityManager entityManager;
+  private final ApplicationEventPublisher events;
+  private final DelegationService delegations;
   private final Clock clock = Clock.systemUTC();
 
-  public TaskService(EntityManager entityManager) {
+  public TaskService(EntityManager entityManager, ApplicationEventPublisher events,
+      DelegationService delegations) {
     this.entityManager = entityManager;
+    this.events = events;
+    this.delegations = delegations;
   }
 
   @Transactional(readOnly = true)
@@ -58,6 +68,9 @@ public class TaskService {
     task.addHistory("CREATED", actor, null, now, correlationId);
     entityManager.persist(task);
     entityManager.flush();
+    // An approval raised straight onto somebody's desk is an assignment; one raised into the
+    // unassigned queue is not news until a person picks it up.
+    announceAssignment(task, actor);
     return response(task, true);
   }
 
@@ -77,27 +90,73 @@ public class TaskService {
       throw ApiException.badRequest(
           "A comment cannot be longer than " + TaskHistoryEntity.MAX_COMMENT + " characters.");
     Instant now = clock.instant();
+    TaskStatus previous = task.getStatus();
+    // "A task may be completed only by its assignee or an authorized delegate" - the blueprint's
+    // words, and REQ-0022's own acceptance criterion. Resolved once, before the switch, because all
+    // four deciding actions ask the same question; claiming does not, because an unclaimed task has
+    // no assignee to stand in for.
+    String onBehalfOf = request.action() == TaskAction.CLAIM ? null : requireAssigneeOrDelegate(task, actor);
     switch (request.action()) {
       case CLAIM -> { task.assignTo(actor); task.addHistory("CLAIMED", actor, request.comment(), now, correlationId); }
-      case START -> { assertAssignee(task, actor); task.transition(TaskStatus.IN_PROGRESS, now); task.addHistory("STARTED", actor, request.comment(), now, correlationId); }
+      case START -> { task.transition(TaskStatus.IN_PROGRESS, now); task.addHistory("STARTED", actor, onBehalfOf, request.comment(), now, correlationId); }
       case APPROVE -> {
-        assertAssignee(task, actor);
         if (task.getType() != TaskType.APPROVAL) throw ApiException.badRequest("Only approval tasks can be approved");
-        task.transition(TaskStatus.COMPLETED, now); task.addHistory("APPROVED", actor, request.comment(), now, correlationId);
+        task.transition(TaskStatus.COMPLETED, now); task.addHistory("APPROVED", actor, onBehalfOf, request.comment(), now, correlationId);
       }
       case REJECT -> {
-        assertAssignee(task, actor);
         if (request.comment() == null || request.comment().isBlank()) throw ApiException.badRequest("A comment is required when rejecting");
-        task.transition(TaskStatus.REJECTED, now); task.addHistory("REJECTED", actor, request.comment().trim(), now, correlationId);
+        task.transition(TaskStatus.REJECTED, now); task.addHistory("REJECTED", actor, onBehalfOf, request.comment().trim(), now, correlationId);
       }
       case COMPLETE -> {
-        assertAssignee(task, actor);
         if (task.getType() == TaskType.APPROVAL) throw ApiException.badRequest("Approval tasks must be approved or rejected");
-        task.transition(TaskStatus.COMPLETED, now); task.addHistory("COMPLETED", actor, request.comment(), now, correlationId);
+        task.transition(TaskStatus.COMPLETED, now); task.addHistory("COMPLETED", actor, onBehalfOf, request.comment(), now, correlationId);
       }
     }
     entityManager.flush();
+    // A claim assigns; every other action decides. Both are announced, but a decision is what the
+    // requester is waiting on, which is why only that one widens beyond the assignee.
+    if (task.getStatus() != previous)
+      announceStatusChange(task, actor, previous, request.comment());
+    else
+      announceAssignment(task, actor);
     return response(task, true);
+  }
+
+  // ---------------------------------------------------------------- notification
+
+  /**
+   * Announces that this approval now sits with somebody.
+   *
+   * <p>Published rather than posted, so {@code WorkItemNotifier} raises it after this transaction
+   * commits: a rolled-back assignment must not leave a message behind, and no HTTP call belongs
+   * inside an open write transaction. Silent when nobody holds it, and silent when the assignee is
+   * the actor - a person who just claimed a task does not need telling that they did.
+   */
+  private void announceAssignment(TaskEntity task, String actor) {
+    if (task.getAssignee() == null || task.getAssignee().equalsIgnoreCase(actor)) return;
+    events.publishEvent(new WorkItemNotification(WorkItemNotification.Kind.ASSIGNED, SlaFamily.APPROVAL,
+        task.getId(), task.getTitle(), eventRef(task), task.getAssignee(), task.getRequester(), actor,
+        task.getStatus().name(), null, null, task.getDueAt()));
+  }
+
+  /** Announces a decision to the assignee and to whoever asked for it. */
+  private void announceStatusChange(TaskEntity task, String actor, TaskStatus previous, String comment) {
+    events.publishEvent(new WorkItemNotification(WorkItemNotification.Kind.STATUS_CHANGED,
+        SlaFamily.APPROVAL, task.getId(), task.getTitle(), eventRef(task), task.getAssignee(),
+        task.getRequester(), actor, task.getStatus().name(), previous.name(), comment, task.getDueAt()));
+  }
+
+  /**
+   * What makes one occurrence distinct: the id of the history row that just recorded it.
+   *
+   * <p>The task id alone would not do - the Integration Service is idempotent on the event, the
+   * reference and the recipient, so a task claimed, released and claimed again would announce only
+   * the first. The history row is written in the same call and flushed before this runs, so its id
+   * is unique and points at the exact audit entry the message describes.
+   */
+  private static String eventRef(TaskEntity task) {
+    var history = task.getHistory();
+    return history.isEmpty() ? task.getId() : task.getId() + "#" + history.getLast().getId();
   }
 
   private void validate(CreateTaskRequest request) {
@@ -125,14 +184,30 @@ public class TaskService {
         .orElseThrow(() -> ApiException.notFound("Task not found"));
   }
 
-  private void assertAssignee(TaskEntity task, String actor) {
-    if (task.getAssignee() == null || !task.getAssignee().equalsIgnoreCase(actor))
-      throw ApiException.forbidden("Only the assignee can perform this action");
+  /**
+   * The assignee whose authority the actor is using, or null when it is their own.
+   *
+   * <p>A delegate still needs the permission for the action - {@code TaskPermissions.requireForAction}
+   * has already run in the controller. What the delegation adds is the record-level right to take
+   * that action on somebody else's task; it does not grant the action itself. Common Platform is the
+   * RBAC store, and a row in Workflow's own database must not be able to mint an authority the
+   * access service never gave.
+   *
+   * @throws ApiException 403 when the actor is neither the assignee nor covered by a delegation in
+   *     force for this task's type and department
+   */
+  private String requireAssigneeOrDelegate(TaskEntity task, String actor) {
+    if (task.getAssignee() != null && task.getAssignee().equalsIgnoreCase(actor)) return null;
+    if (task.getAssignee() != null
+        && delegations.authorising(actor, task.getAssignee(),
+            DelegationTarget.approval(task.getType().name(), task.getDepartment())).isPresent())
+      return task.getAssignee();
+    throw ApiException.forbidden("Only the assignee or an authorized delegate can perform this action");
   }
 
   private TaskResponse response(TaskEntity task, boolean history) {
     var events = history ? task.getHistory().stream()
-        .map(h -> new HistoryResponse(h.getId(), h.getAction(), h.getActor(), h.getComment(), h.getOccurredAt(), h.getCorrelationId())).toList()
+        .map(h -> new HistoryResponse(h.getId(), h.getAction(), h.getActor(), h.getOnBehalfOf(), h.getComment(), h.getOccurredAt(), h.getCorrelationId())).toList()
         : List.<HistoryResponse>of();
     return new TaskResponse(task.getId(), task.getVersion(), task.getTitle(), task.getReference(), task.getDepartment(),
         task.getType(), task.getPriority(), task.getStatus(), task.getRequester(), task.getAssignee(),

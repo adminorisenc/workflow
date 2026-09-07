@@ -3,9 +3,15 @@ package com.orisenc.workflow.projecttask;
 import static com.orisenc.workflow.projecttask.ProjectTaskDtos.*;
 
 import com.orisenc.workflow.api.ApiException;
+import com.orisenc.workflow.delegation.DelegationCover;
+import com.orisenc.workflow.delegation.DelegationScope;
+import com.orisenc.workflow.delegation.DelegationService;
+import com.orisenc.workflow.notify.WorkItemNotification;
+import com.orisenc.workflow.sla.SlaFamily;
 import com.orisenc.workflow.task.TaskPriority;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.TypedQuery;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,6 +53,8 @@ public class ProjectTaskService {
   private static final int MAX_HIERARCHY_DEPTH = 10;
 
   private final EntityManager entityManager;
+  private final ApplicationEventPublisher events;
+  private final DelegationService delegations;
   private final Clock clock;
 
   // Two constructors: this one for Spring, the package-private one below for tests that need a
@@ -54,13 +62,27 @@ public class ProjectTaskService {
   // a no-arg constructor, and the context fails to start with "No default constructor found" -
   // a failure no unit test can see, because tests call the other constructor directly.
   @Autowired
-  public ProjectTaskService(EntityManager entityManager) {
-    this(entityManager, Clock.systemUTC());
+  public ProjectTaskService(EntityManager entityManager, ApplicationEventPublisher events,
+      DelegationService delegations) {
+    this(entityManager, events, delegations, Clock.systemUTC());
   }
 
-  ProjectTaskService(EntityManager entityManager, Clock clock) {
+  ProjectTaskService(EntityManager entityManager, ApplicationEventPublisher events,
+      DelegationService delegations, Clock clock) {
     this.entityManager = entityManager;
+    this.events = events;
+    this.delegations = delegations;
     this.clock = clock;
+  }
+
+  /**
+   * The work this caller may reach as somebody else, read once per request.
+   *
+   * <p>Once, not per item: a queue of two hundred rows must not become two hundred delegation
+   * lookups, and every audience decision in one request should be made against the same answer.
+   */
+  private List<DelegationCover> cover(String actor) {
+    return delegations.coverFor(actor, DelegationScope.WORK_ITEMS);
   }
 
   /** Filter criteria. Every field is optional; nulls mean "do not narrow on this". */
@@ -77,10 +99,10 @@ public class ProjectTaskService {
     var conditions = new ArrayList<String>();
     var parameters = new LinkedHashMap<String, Object>();
 
-    String audience = ProjectTaskVisibilityPolicy.listPredicate(permissions);
-    if (!audience.isEmpty()) {
-      conditions.add(audience);
-      parameters.put("actor", actor);
+    var audience = ProjectTaskVisibilityPolicy.audience(permissions, actor, cover(actor));
+    if (!audience.unrestricted()) {
+      conditions.add(audience.jpql());
+      parameters.putAll(audience.parameters());
     }
     if (query.status() != null) { conditions.add("t.status = :status"); parameters.put("status", query.status()); }
     if (notBlank(query.ownerUserId())) {
@@ -137,8 +159,8 @@ public class ProjectTaskService {
 
   @Transactional(readOnly = true)
   public ProjectTaskDetail get(String id, String actor, Set<String> permissions) {
-    var task = readable(id, actor, permissions);
-    return detail(task, actor, permissions);
+    var cover = cover(actor);
+    return detail(readable(id, actor, permissions, cover), actor, permissions, cover);
   }
 
   @Transactional
@@ -166,6 +188,10 @@ public class ProjectTaskService {
     task.addHistory("CREATED", actor, null, now, correlationId);
     entityManager.persist(task);
     entityManager.flush();
+    // Creating a task already assigned to somebody is an assignment, and the person it landed on is
+    // the one who needs to know. Creating it unassigned announces nothing: an empty queue entry is
+    // not news until somebody is accountable for it.
+    announceAssignment(task, actor);
     return detail(task, actor, ProjectTaskPermissions.granted());
   }
 
@@ -222,31 +248,40 @@ public class ProjectTaskService {
   public ProjectTaskDetail transition(String id, TransitionRequest request, String actor, String correlationId) {
     if (request == null || request.status() == null) throw ApiException.badRequest("A target status is required");
     var permissions = ProjectTaskPermissions.granted();
-    var task = readable(id, actor, permissions);
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
     assertVersion(task, request.expectedVersion());
-    if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions))
-      throw ApiException.forbidden("Only the owner of this work item can change its status.");
+    if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover))
+      throw ApiException.forbidden(
+          "Only the owner of this work item, or somebody they have delegated it to, can change its status.");
     if (task.getArchivedAt() != null) throw ApiException.conflict("This work item is archived.");
 
     if (request.status() == ProjectTaskStatus.COMPLETED && !task.requiredChecklistComplete())
       throw ApiException.badRequest("Every required checklist item must be completed first.");
 
+    ProjectTaskStatus previous = task.getStatus();
+    // Who the actor is standing in for, or null when it is their own work. Written onto the history
+    // row so the audit answers both "who did it" and "whose authority was used" (REQ-0027).
+    String onBehalfOf = ProjectTaskVisibilityPolicy.actingFor(task, actor, cover);
     try {
-      task.transition(request.status(), actor, request.comment(), clock.instant(), correlationId);
+      task.transition(request.status(), actor, onBehalfOf, request.comment(), clock.instant(),
+          correlationId);
     } catch (IllegalArgumentException rejected) {
       // The entity guards the lifecycle; the service only translates its refusal to the API contract.
       throw ApiException.badRequest(rejected.getMessage());
     }
     entityManager.flush();
-    return detail(task, actor, permissions);
+    announceStatusChange(task, actor, request.status().name(), previous.name(), request.comment());
+    return detail(task, actor, permissions, cover);
   }
 
   @Transactional
   public ProjectTaskDetail claim(String id, ClaimRequest request, String actor, String correlationId) {
     var permissions = ProjectTaskPermissions.granted();
-    var task = readable(id, actor, permissions);
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
     assertVersion(task, request == null ? null : request.expectedVersion());
-    if (!ProjectTaskVisibilityPolicy.mayClaim(task, actor, permissions))
+    if (!ProjectTaskVisibilityPolicy.mayClaim(task, actor, permissions, cover))
       throw ApiException.forbidden("This work item is already owned by someone else.");
     if (task.getArchivedAt() != null) throw ApiException.conflict("This work item is archived.");
     if (task.getStatus().closed()) throw ApiException.conflict("This work item is already closed.");
@@ -256,7 +291,7 @@ public class ProjectTaskService {
     task.addHistory("CLAIMED", actor, request == null ? null : blankToNull(request.comment()),
         clock.instant(), correlationId);
     entityManager.flush();
-    return detail(task, actor, permissions);
+    return detail(task, actor, permissions, cover);
   }
 
   @Transactional
@@ -267,7 +302,7 @@ public class ProjectTaskService {
     var permissions = ProjectTaskPermissions.granted();
     ProjectTaskPermissions.require(ProjectTaskPermissions.MANAGE,
         "Your role does not permit reassigning work items.");
-    var task = readable(id, actor, permissions);
+    var task = readable(id, actor, permissions, List.of());
     assertVersion(task, request.expectedVersion());
     if (task.getArchivedAt() != null) throw ApiException.conflict("This work item is archived.");
 
@@ -277,6 +312,7 @@ public class ProjectTaskService {
         "From " + previous + " to " + request.ownerUserId().trim() + ": " + request.comment().trim(),
         clock.instant(), correlationId);
     entityManager.flush();
+    announceAssignment(task, actor);
     return detail(task, actor, permissions);
   }
 
@@ -286,7 +322,8 @@ public class ProjectTaskService {
     var permissions = ProjectTaskPermissions.granted();
     ProjectTaskPermissions.require(ProjectTaskPermissions.MANAGE,
         "Your role does not permit archiving work items.");
-    var task = readable(id, actor, permissions);
+    // No cover needed: this path already required MANAGE, which sees everything.
+    var task = readable(id, actor, permissions, List.of());
     if (task.getArchivedAt() != null) throw ApiException.conflict("This work item is already archived.");
 
     Instant now = clock.instant();
@@ -303,48 +340,94 @@ public class ProjectTaskService {
       throw ApiException.badRequest("A comment cannot be longer than "
           + ProjectTaskCommentEntity.MAX_BODY + " characters.");
     var permissions = ProjectTaskPermissions.granted();
-    var task = readable(id, actor, permissions);
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
     if (!permissions.contains(ProjectTaskPermissions.EXECUTE)
         && !permissions.contains(ProjectTaskPermissions.MANAGE))
       throw ApiException.forbidden("Your role does not permit commenting on work items.");
 
     task.addComment(actor, request.body().trim(), clock.instant());
     entityManager.flush();
-    return detail(task, actor, permissions);
+    return detail(task, actor, permissions, cover);
   }
 
   @Transactional
   public ProjectTaskDetail toggleChecklistItem(String id, Long itemId, ChecklistToggleRequest request,
       String actor, String correlationId) {
     var permissions = ProjectTaskPermissions.granted();
-    var task = readable(id, actor, permissions);
-    if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions))
-      throw ApiException.forbidden("Only the owner of this work item can update its checklist.");
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover))
+      throw ApiException.forbidden(
+          "Only the owner of this work item, or somebody they have delegated it to, can update its checklist.");
     if (task.getArchivedAt() != null) throw ApiException.conflict("This work item is archived.");
 
     var item = task.getChecklist().stream().filter(candidate -> candidate.getId().equals(itemId)).findFirst()
         .orElseThrow(() -> ApiException.notFound("Checklist item not found"));
     boolean complete = request == null || request.completed() == null || request.completed();
     Instant now = clock.instant();
+    String onBehalfOf = ProjectTaskVisibilityPolicy.actingFor(task, actor, cover);
     if (complete) {
       item.complete(actor, now);
-      task.addHistory("CHECKLIST_COMPLETED", actor, item.getTitle(), now, correlationId);
+      task.addHistory("CHECKLIST_COMPLETED", actor, onBehalfOf, item.getTitle(), now, correlationId);
     } else {
       item.reopen();
-      task.addHistory("CHECKLIST_REOPENED", actor, item.getTitle(), now, correlationId);
+      task.addHistory("CHECKLIST_REOPENED", actor, onBehalfOf, item.getTitle(), now, correlationId);
     }
     entityManager.flush();
-    return detail(task, actor, permissions);
+    return detail(task, actor, permissions, cover);
+  }
+
+  // ---------------------------------------------------------------- notification
+
+  /**
+   * Announces that this item now belongs to somebody.
+   *
+   * <p>Published rather than posted: {@code WorkItemNotifier} listens after the transaction commits,
+   * so a rolled-back assignment cannot leave a message behind telling somebody about work they were
+   * never given, and no HTTP call happens with this write transaction open.
+   *
+   * <p>Silent when the item is unowned, and silent when somebody assigned it to themselves - the
+   * notifier drops the actor from every audience, and this saves the round trip.
+   */
+  private void announceAssignment(ProjectTaskEntity task, String actor) {
+    if (task.getOwnerUserId() == null || task.getOwnerUserId().equalsIgnoreCase(actor)) return;
+    events.publishEvent(new WorkItemNotification(WorkItemNotification.Kind.ASSIGNED, SlaFamily.WORK_ITEM,
+        task.getId(), task.getTitle(), eventRef(task), task.getOwnerUserId(), task.getCreatedBy(),
+        actor, task.getStatus().name(), null, null, task.getDueAt()));
+  }
+
+  /** Announces a lifecycle move to the owner and to whoever raised the work. */
+  private void announceStatusChange(ProjectTaskEntity task, String actor, String status,
+      String previousStatus, String reason) {
+    events.publishEvent(new WorkItemNotification(WorkItemNotification.Kind.STATUS_CHANGED,
+        SlaFamily.WORK_ITEM, task.getId(), task.getTitle(), eventRef(task), task.getOwnerUserId(),
+        task.getCreatedBy(), actor, status, previousStatus, reason, task.getDueAt()));
+  }
+
+  /**
+   * What makes one occurrence distinct: the id of the history row that just recorded it.
+   *
+   * <p>The task id alone would not do. The Integration Service is idempotent on the event, the
+   * reference and the recipient, so reassigning work away from somebody and back again would raise
+   * the first message and silently drop the second. The history row is written in the same call as
+   * the change and is already flushed by the time this runs, so its id is both unique and a pointer
+   * to the exact audit entry the message describes.
+   */
+  private static String eventRef(ProjectTaskEntity task) {
+    var history = task.getHistory();
+    return history.isEmpty() ? task.getId() : task.getId() + "#" + history.getLast().getId();
   }
 
   // ---------------------------------------------------------------- internals
 
-  private ProjectTaskEntity readable(String id, String actor, Set<String> permissions) {
+  private ProjectTaskEntity readable(String id, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
     var task = entityManager.find(ProjectTaskEntity.class, id);
     // A task the caller may not see reports as missing rather than forbidden: a 403 would confirm
     // that a work item with this id exists, which is itself information the caller is not entitled
     // to (policy P-06 - the same decision in every channel).
-    if (task == null || !ProjectTaskVisibilityPolicy.mayView(task, actor, permissions))
+    if (task == null || !ProjectTaskVisibilityPolicy.mayView(task, actor, permissions, cover))
       throw ApiException.notFound("Work item not found");
     return task;
   }
@@ -427,10 +510,16 @@ public class ProjectTaskService {
     return new ProjectTaskSummary(task.getId(), task.getVersion(), task.getTitle(), task.getTaskType(),
         task.getPriority(), task.getStatus(), task.getVisibility(), task.getRelevantTeam(),
         task.getOwnerUserId(), task.getParentTaskId(), linked(task), task.getCreatedAt(), task.getDueAt(),
-        task.getCompletedAt(), task.overdue(now), childCount, task.getArchivedAt() != null);
+        task.getCompletedAt(), task.overdue(now), task.getEscalationLevel(), childCount,
+        task.getArchivedAt() != null);
   }
 
   private ProjectTaskDetail detail(ProjectTaskEntity task, String actor, Set<String> permissions) {
+    return detail(task, actor, permissions, cover(actor));
+  }
+
+  private ProjectTaskDetail detail(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
     Instant now = clock.instant();
     var childEntities = children(task.getId());
     var childSummaries = childEntities.stream().map(child -> summary(child, 0, now)).toList();
@@ -438,10 +527,10 @@ public class ProjectTaskService {
         task.getTaskType(), task.getPriority(), task.getStatus(), task.getVisibility(),
         task.getRelevantTeam(), task.getOwnerUserId(), task.getCreatedBy(), task.getParentTaskId(),
         linked(task), task.getCreatedAt(), task.getDueAt(), task.getStartedAt(), task.getCompletedAt(),
-        task.getCancelledAt(), task.getArchivedAt(), task.overdue(now),
+        task.getCancelledAt(), task.getArchivedAt(), task.overdue(now), task.getEscalationLevel(),
         List.copyOf(task.getStatus().allowedNext()),
-        ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions),
-        ProjectTaskVisibilityPolicy.mayClaim(task, actor, permissions),
+        ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover),
+        ProjectTaskVisibilityPolicy.mayClaim(task, actor, permissions, cover),
         task.requiredChecklistComplete(), childSummaries,
         task.getChecklist().stream().map(item -> new ChecklistItemResponse(item.getId(), item.getSequenceNo(),
             item.getTitle(), item.isRequired(), item.isCompleted(), item.getCompletedBy(),
@@ -449,8 +538,8 @@ public class ProjectTaskService {
         task.getComments().stream().map(entry -> new CommentResponse(entry.getId(), entry.getAuthor(),
             entry.getBody(), entry.getCreatedAt())).toList(),
         task.getHistory().stream().map(event -> new HistoryResponse(event.getId(), event.getAction(),
-            event.getFromStatus(), event.getToStatus(), event.getActor(), event.getReason(),
-            event.getOccurredAt(), event.getCorrelationId())).toList());
+            event.getFromStatus(), event.getToStatus(), event.getActor(), event.getOnBehalfOf(),
+            event.getReason(), event.getOccurredAt(), event.getCorrelationId())).toList());
   }
 
   private static LinkedEntityResponse linked(ProjectTaskEntity task) {

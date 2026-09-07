@@ -159,6 +159,39 @@ class ProjectTaskEntityTest {
   }
 
   @Test
+  void anEscalationIsRecordedWithTheHistoryRowThatExplainsIt() {
+    // The same rule as a transition: a level without its reason on the record is an audit hole, and
+    // somebody receiving an escalation with nothing on the item to explain it has no way to check.
+    var task = task();
+
+    task.recordEscalation(2, "Past its due date; told owner@orisenc.com.", NOW, "sla-wrk-test01-L2");
+
+    assertThat(task.getEscalationLevel()).isEqualTo(2);
+    var latest = task.getHistory().getLast();
+    assertThat(latest.getAction()).isEqualTo("SLA_ESCALATED");
+    assertThat(latest.getActor()).isEqualTo(ProjectTaskEntity.SLA_ACTOR);
+    assertThat(latest.getReason()).contains("owner@orisenc.com");
+  }
+
+  @Test
+  void aRungAlreadyReachedIsRefusedRatherThanRecordedTwice() {
+    // Two overlapping passes, or a retry after a slow write. Refusing here rather than in the
+    // scheduled job is what makes the guard hold whoever calls it.
+    var task = task();
+    task.recordEscalation(2, "breached", NOW, "c");
+
+    assertThatThrownBy(() -> task.recordEscalation(2, "breached again", NOW, "c"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("already reached SLA level 2");
+    assertThat(task.getEscalationLevel()).isEqualTo(2);
+  }
+
+  @Test
+  void aNewItemHasCrossedNothing() {
+    assertThat(task().getEscalationLevel()).isZero();
+  }
+
+  @Test
   void everyStatusHasSomewhereToGo() {
     // A dead-end state would strand work with no legal move and no way out except the database.
     for (ProjectTaskStatus status : ProjectTaskStatus.values()) {

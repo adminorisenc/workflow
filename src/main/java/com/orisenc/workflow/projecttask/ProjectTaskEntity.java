@@ -34,6 +34,9 @@ import java.util.UUID;
 })
 public class ProjectTaskEntity {
 
+  /** The actor on a history row nobody chose to write. */
+  public static final String SLA_ACTOR = "sla-monitor";
+
   @Id @Column(length = 40) private String id;
   @Version private long version;
   @Column(name = "organization_id") private UUID organizationId;
@@ -78,6 +81,21 @@ public class ProjectTaskEntity {
   @Column(name = "cancelled_at") private Instant cancelledAt;
   /** Archived instead of deleted, so the record stays auditable (TM-001). */
   @Column(name = "archived_at") private Instant archivedAt;
+
+  /**
+   * The highest SLA rung already raised for this item - see {@code com.orisenc.workflow.sla}.
+   *
+   * <p>Stored rather than recomputed so the ladder only ever moves upwards: the pass raises a
+   * notification when the rung it computes is higher than this, and nothing else. Without it a
+   * quarter-hourly scan would re-raise every overdue item on every run, and would depend entirely on
+   * the Integration Service's delivery log to stay quiet - a second system's memory standing in for
+   * this one's.
+   *
+   * <p>Deliberately not reset when a completed item is reopened. The rung was genuinely reached and
+   * somebody was genuinely told; a reopened item that is still past its deadline escalates again
+   * only when it crosses a rung it has not crossed before.
+   */
+  @Column(name = "escalation_level", nullable = false) private int escalationLevel;
 
   @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
   @OrderBy("occurredAt ASC") private List<ProjectTaskHistoryEntity> history = new ArrayList<>();
@@ -125,6 +143,17 @@ public class ProjectTaskEntity {
    *     the service translates these into the API error contract.
    */
   public void transition(ProjectTaskStatus next, String actor, String reason, Instant time, String correlationId) {
+    transition(next, actor, null, reason, time, correlationId);
+  }
+
+  /**
+   * The same move, taken under a delegation.
+   *
+   * <p>{@code onBehalfOf} is the owner whose authority was used. The overload above is the same call
+   * for somebody acting as themselves, which is most of them.
+   */
+  public void transition(ProjectTaskStatus next, String actor, String onBehalfOf, String reason,
+      Instant time, String correlationId) {
     if (next == null) throw new IllegalArgumentException("A target status is required");
     if (reason == null || reason.isBlank())
       throw new IllegalArgumentException("A comment is required for every status change");
@@ -137,7 +166,8 @@ public class ProjectTaskEntity {
     ProjectTaskStatus previous = status;
     status = next;
     stampTimestamps(previous, next, time);
-    history.add(new ProjectTaskHistoryEntity(this, previous, next, actor, reason.trim(), time, correlationId));
+    history.add(new ProjectTaskHistoryEntity(this, previous, next, actor, onBehalfOf, reason.trim(),
+        time, correlationId));
   }
 
   /**
@@ -162,10 +192,34 @@ public class ProjectTaskEntity {
 
   public void assignTo(String actor) { ownerUserId = actor; }
 
+  /**
+   * Records that this item has reached an SLA rung, and writes the history row that says so.
+   *
+   * <p>Both together, like {@link #transition}: an escalation the audit trail cannot see is a
+   * message somebody received with nothing on the item to explain it. The actor is the service
+   * rather than a person, because nobody decided this - a deadline passed.
+   *
+   * @throws IllegalArgumentException when the rung is not above the one already recorded, which
+   *     would mean the caller is about to notify somebody twice about the same thing
+   */
+  public void recordEscalation(int level, String note, Instant time, String correlationId) {
+    if (level <= escalationLevel)
+      throw new IllegalArgumentException("This work item has already reached SLA level " + escalationLevel);
+    escalationLevel = level;
+    history.add(new ProjectTaskHistoryEntity(this, "SLA_ESCALATED", SLA_ACTOR, null, note, time,
+        correlationId));
+  }
+
   public void archive(Instant time) { archivedAt = time; }
 
   public void addHistory(String action, String actor, String comment, Instant time, String correlationId) {
-    history.add(new ProjectTaskHistoryEntity(this, action, actor, comment, time, correlationId));
+    addHistory(action, actor, null, comment, time, correlationId);
+  }
+
+  /** A non-transition event recorded under a delegation. */
+  public void addHistory(String action, String actor, String onBehalfOf, String comment, Instant time,
+      String correlationId) {
+    history.add(new ProjectTaskHistoryEntity(this, action, actor, onBehalfOf, comment, time, correlationId));
   }
 
   public void addComment(String author, String body, Instant time) {
@@ -185,6 +239,8 @@ public class ProjectTaskEntity {
     return checklist.stream().filter(ProjectTaskChecklistItemEntity::isRequired)
         .allMatch(ProjectTaskChecklistItemEntity::isCompleted);
   }
+
+  public int getEscalationLevel() { return escalationLevel; }
 
   public boolean overdue(Instant now) {
     return !status.closed() && archivedAt == null && dueAt.isBefore(now);

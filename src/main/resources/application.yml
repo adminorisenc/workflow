@@ -31,6 +31,51 @@ orisenc:
     base-url: ${ORISENC_AUTHORIZATION_BASE_URL:http://localhost:8080/common-platform-service/ws}
     cache-ttl: 5m
 
+  # Workflow raises notifications; it never delivers one. Disabled until an operator supplies a
+  # route, so a deployment without the Integration Service has no client rather than a client that
+  # fails on every escalation - and the SLA pass then records that it could not run, instead of
+  # stamping escalation levels nobody was told about.
+  integration-client:
+    enabled: ${ORISENC_INTEGRATION_CLIENT_ENABLED:false}
+    base-url: ${ORISENC_INTEGRATION_BASE_URL:http://localhost:8088/integration-service/ws}
+    client-id: ${ORISENC_CLIENT_ID:}
+    # Workflow's own application secret. It may be the same secret used for authorization
+    # resolution, but it is named separately so deployments can rotate it independently.
+    client-secret: ${ORISENC_INTEGRATION_CLIENT_SECRET:${ORISENC_AUTHORIZATION_CLIENT_SECRET:}}
+    # The Integration Service's application ID URI plus /.default.
+    scope: ${ORISENC_INTEGRATION_SCOPE:}
+    request-timeout: ${ORISENC_INTEGRATION_REQUEST_TIMEOUT:10s}
+
+  workflow:
+    # The service-level ladder. A business promise rather than a property of the code, so every rung
+    # is configurable; REQ-0030's admin panel does not exist yet, which is why these are
+    # platform-wide rather than per department or per task type.
+    sla:
+      enabled: ${ORISENC_WORKFLOW_SLA_ENABLED:true}
+      # Quarter-hourly, not daily: a deadline missed at 09:05 and announced at midnight is a report,
+      # not an escalation.
+      cron: ${ORISENC_WORKFLOW_SLA_CRON:0 */15 * * * *}
+      zone: ${ORISENC_WORKFLOW_SLA_ZONE:Asia/Kolkata}
+      due-soon-lead: ${ORISENC_WORKFLOW_SLA_DUE_SOON_LEAD:24h}
+      # Offsets after the due date. Each entry is one further rung, and only the highest crossed is
+      # ever raised - so a task three days late gets the escalation, not four messages.
+      escalation-steps: ${ORISENC_WORKFLOW_SLA_ESCALATION_STEPS:24h,72h}
+      # The honest stand-in for "the owner's manager", which cannot be resolved: no user record on
+      # the platform carries a manager or a department. Blank means escalations reach the creator
+      # and the parent item's owner only.
+      escalation-contact: ${ORISENC_WORKFLOW_SLA_ESCALATION_CONTACT:}
+      batch-size: ${ORISENC_WORKFLOW_SLA_BATCH_SIZE:500}
+
+    # Delegation (REQ-0027). Time-bound by requirement, so a maximum window is part of the contract
+    # rather than a nicety: a ten-year delegation is technically bounded and practically permanent.
+    delegation:
+      max-duration: ${ORISENC_WORKFLOW_DELEGATION_MAX_DURATION:90d}
+      # Hourly. An expiry an hour late leaves somebody able to act on work that is no longer theirs;
+      # a daily pass leaves them a day, and no pass at all leaves them indefinitely.
+      expiry-cron: ${ORISENC_WORKFLOW_DELEGATION_EXPIRY_CRON:0 5 * * * *}
+      zone: ${ORISENC_WORKFLOW_DELEGATION_ZONE:Asia/Kolkata}
+      batch-size: ${ORISENC_WORKFLOW_DELEGATION_BATCH_SIZE:500}
+
 logging:
   level:
     root: WARN

@@ -44,8 +44,16 @@ public final class ProjectTaskDtos {
 
   public record ChecklistToggleRequest(Boolean completed) {}
 
+  /**
+   * One event on the item.
+   *
+   * <p>{@code onBehalfOf} is null for the ordinary case and set when the actor was standing in for
+   * somebody under a delegation (REQ-0027). Both are served, because either alone is misleading: the
+   * delegate did it, and the owner was accountable for it.
+   */
   public record HistoryResponse(Long id, String action, ProjectTaskStatus fromStatus,
-      ProjectTaskStatus toStatus, String actor, String reason, Instant occurredAt, String correlationId) {}
+      ProjectTaskStatus toStatus, String actor, String onBehalfOf, String reason, Instant occurredAt,
+      String correlationId) {}
 
   public record CommentResponse(Long id, String author, String body, Instant createdAt) {}
 
@@ -54,13 +62,20 @@ public final class ProjectTaskDtos {
 
   public record LinkedEntityResponse(LinkedEntityType type, String id, String reference) {}
 
-  /** List row. Omits history, comments and checklist so a queue does not pay for detail nobody read. */
+  /**
+   * List row. Omits history, comments and checklist so a queue does not pay for detail nobody read.
+   *
+   * <p>{@code escalationLevel} is the highest SLA rung raised on this item: 0 for one still inside
+   * its deadline, 1 for a warning, 2 for a breach and higher for each escalation beyond it. Served
+   * so a queue can show that an item has been escalated - {@code overdue} alone cannot distinguish
+   * a task an hour late from one nobody has touched in a week.
+   */
   public record ProjectTaskSummary(
       String id, long version, String title, ProjectTaskType taskType, TaskPriority priority,
       ProjectTaskStatus status, ProjectTaskVisibility visibility, String relevantTeam,
       String ownerUserId, String parentTaskId, LinkedEntityResponse linkedEntity,
-      Instant createdAt, Instant dueAt, Instant completedAt, boolean overdue, int childCount,
-      boolean archived) {}
+      Instant createdAt, Instant dueAt, Instant completedAt, boolean overdue, int escalationLevel,
+      int childCount, boolean archived) {}
 
   /**
    * Full detail.
@@ -76,7 +91,7 @@ public final class ProjectTaskDtos {
       String relevantTeam, String ownerUserId, String createdBy, String parentTaskId,
       LinkedEntityResponse linkedEntity, Instant createdAt, Instant dueAt, Instant startedAt,
       Instant completedAt, Instant cancelledAt, Instant archivedAt, boolean overdue,
-      List<ProjectTaskStatus> allowedNextStatuses, boolean mayAct, boolean mayClaim,
+      int escalationLevel, List<ProjectTaskStatus> allowedNextStatuses, boolean mayAct, boolean mayClaim,
       boolean requiredChecklistComplete, List<ProjectTaskSummary> children,
       List<ChecklistItemResponse> checklist, List<CommentResponse> comments,
       List<HistoryResponse> history) {}

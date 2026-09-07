@@ -32,6 +32,14 @@ public class ProjectTaskHistoryEntity {
   @Column(length = 40) private String action;
 
   @Column(nullable = false, length = 120) private String actor;
+  /**
+   * Whose authority the actor was using, when it was not their own (REQ-0027).
+   *
+   * <p>Null for the ordinary case. When set, the pair is the whole point: an audit that records only
+   * the delegate cannot answer who was accountable, and one that records only the owner is a lie
+   * about who did it.
+   */
+  @Column(name = "on_behalf_of", length = 120) private String onBehalfOf;
   @Column(length = 2000) private String reason;
   @Column(name = "occurred_at", nullable = false) private Instant occurredAt;
   @Column(name = "correlation_id", nullable = false, length = 100) private String correlationId;
@@ -40,23 +48,25 @@ public class ProjectTaskHistoryEntity {
 
   /** A status transition. */
   ProjectTaskHistoryEntity(ProjectTaskEntity task, ProjectTaskStatus fromStatus, ProjectTaskStatus toStatus,
-      String actor, String reason, Instant occurredAt, String correlationId) {
+      String actor, String onBehalfOf, String reason, Instant occurredAt, String correlationId) {
     this.task = task;
     this.fromStatus = fromStatus;
     this.toStatus = toStatus;
     this.action = "STATUS_CHANGED";
     this.actor = actor;
+    this.onBehalfOf = onBehalfOf;
     this.reason = reason;
     this.occurredAt = occurredAt;
     this.correlationId = correlationId;
   }
 
   /** A non-transition event. */
-  ProjectTaskHistoryEntity(ProjectTaskEntity task, String action, String actor, String reason,
-      Instant occurredAt, String correlationId) {
+  ProjectTaskHistoryEntity(ProjectTaskEntity task, String action, String actor, String onBehalfOf,
+      String reason, Instant occurredAt, String correlationId) {
     this.task = task;
     this.action = action;
     this.actor = actor;
+    this.onBehalfOf = onBehalfOf;
     this.reason = reason;
     this.occurredAt = occurredAt;
     this.correlationId = correlationId;
@@ -67,6 +77,7 @@ public class ProjectTaskHistoryEntity {
   public ProjectTaskStatus getToStatus() { return toStatus; }
   public String getAction() { return action; }
   public String getActor() { return actor; }
+  public String getOnBehalfOf() { return onBehalfOf; }
   public String getReason() { return reason; }
   public Instant getOccurredAt() { return occurredAt; }
   public String getCorrelationId() { return correlationId; }

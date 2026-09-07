@@ -19,6 +19,10 @@ dependencies {
   runtimeOnly 'org.postgresql:postgresql'
 
   testImplementation 'org.springframework.boot:spring-boot-starter-test'
+  // The SLA scan is two hand-written JPQL queries, one of them a self-join. Neither is checked by
+  // the compiler, and a malformed one fails at the first scheduled pass in production rather than
+  // in the build - so the suite runs them against a real engine. Matches Accounts and Integration.
+  testRuntimeOnly 'com.h2database:h2'
   testImplementation 'org.assertj:assertj-core'
   testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

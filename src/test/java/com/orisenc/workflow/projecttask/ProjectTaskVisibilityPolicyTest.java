@@ -2,9 +2,11 @@ package com.orisenc.workflow.projecttask;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.orisenc.workflow.delegation.DelegationCover;
 import com.orisenc.workflow.task.TaskPriority;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -112,13 +114,65 @@ class ProjectTaskVisibilityPolicyTest {
   @Test
   void theListPredicateMatchesTheSingleRecordRule() {
     // A manager is unrestricted, so the query carries no audience clause at all.
-    assertThat(ProjectTaskVisibilityPolicy.listPredicate(MANAGER)).isEmpty();
+    assertThat(ProjectTaskVisibilityPolicy.audience(MANAGER, OWNER, java.util.List.of())
+        .unrestricted()).isTrue();
 
     // Everyone else is narrowed to their own work plus what their audience permissions allow. The
     // clause and mayView have to agree; this pins the shape that makes them agree.
-    assertThat(ProjectTaskVisibilityPolicy.listPredicate(VIEWER))
+    assertThat(ProjectTaskVisibilityPolicy.audience(VIEWER, OWNER, java.util.List.of()).jpql())
         .contains("t.ownerUserId").contains("t.createdBy").contains("ALL_TEAMS")
         .doesNotContain("RELEVANT_TEAM");
-    assertThat(ProjectTaskVisibilityPolicy.listPredicate(TEAM_VIEWER)).contains("RELEVANT_TEAM");
+    assertThat(ProjectTaskVisibilityPolicy.audience(TEAM_VIEWER, OWNER, java.util.List.of()).jpql())
+        .contains("RELEVANT_TEAM");
+  }
+
+  @Test
+  void aDelegateSeesAndMayActOnTheDelegatorsOwnedWork() {
+    var task = task(ProjectTaskVisibility.INDIVIDUAL, OWNER);
+    var cover = List.of(new DelegationCover(OWNER, null, null));
+
+    assertThat(ProjectTaskVisibilityPolicy.mayView(task, STRANGER, WORKER, cover)).isTrue();
+    assertThat(ProjectTaskVisibilityPolicy.mayAct(task, STRANGER, WORKER, cover)).isTrue();
+    // Cover widens the record audience; it does not mint the execute permission.
+    assertThat(ProjectTaskVisibilityPolicy.mayAct(task, STRANGER, VIEWER, cover)).isFalse();
+  }
+
+  @Test
+  void delegationNarrowingByTypeAndTeamIsEnforced() {
+    var task = task(ProjectTaskVisibility.INDIVIDUAL, OWNER);
+
+    assertThat(ProjectTaskVisibilityPolicy.mayView(task, STRANGER, WORKER,
+        List.of(new DelegationCover(OWNER, "APPROVAL", null)))).isFalse();
+    assertThat(ProjectTaskVisibilityPolicy.mayView(task, STRANGER, WORKER,
+        List.of(new DelegationCover(OWNER, "DELIVERABLE", "Finance")))).isFalse();
+    assertThat(ProjectTaskVisibilityPolicy.mayView(task, STRANGER, WORKER,
+        List.of(new DelegationCover(OWNER, "DELIVERABLE", "operations")))).isTrue();
+  }
+
+  @Test
+  void audienceEmitsOneBoundClausePerDelegation() {
+    var audience = ProjectTaskVisibilityPolicy.audience(WORKER, STRANGER, List.of(
+        new DelegationCover(OWNER, "DELIVERABLE", "Operations"),
+        new DelegationCover("second@orisenc.com", null, "Finance")));
+
+    assertThat(audience.jpql()).contains(":dlg0", ":dlgType0", ":dlgTeam0", ":dlg1",
+        ":dlgTeam1").doesNotContain(":dlgType1");
+    assertThat(audience.parameters())
+        .containsEntry("actor", STRANGER)
+        .containsEntry("dlg0", OWNER)
+        .containsEntry("dlgType0", ProjectTaskType.DELIVERABLE)
+        .containsEntry("dlgTeam0", "operations")
+        .containsEntry("dlg1", "second@orisenc.com")
+        .containsEntry("dlgTeam1", "finance")
+        .doesNotContainKey("dlgType1");
+  }
+
+  @Test
+  void actingForReturnsTheDelegatorWhoseCoverAuthorizesTheAction() {
+    var task = task(ProjectTaskVisibility.INDIVIDUAL, OWNER);
+    var cover = List.of(new DelegationCover(OWNER, "DELIVERABLE", "Operations"));
+
+    assertThat(ProjectTaskVisibilityPolicy.actingFor(task, STRANGER, cover)).isEqualTo(OWNER);
+    assertThat(ProjectTaskVisibilityPolicy.actingFor(task, OWNER, cover)).isNull();
   }
 }

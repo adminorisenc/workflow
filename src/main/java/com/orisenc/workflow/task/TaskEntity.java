@@ -13,6 +13,10 @@ import java.util.UUID;
     @Index(name = "idx_workflow_task_department_due", columnList = "department,due_at")
 })
 public class TaskEntity {
+
+  /** The actor on a history row nobody chose to write. */
+  public static final String SLA_ACTOR = "sla-monitor";
+
   @Id @Column(length = 40) private String id;
   @Version private long version;
   @Column(name = "organization_id") private UUID organizationId;
@@ -31,6 +35,13 @@ public class TaskEntity {
   @Column(nullable = false) private Instant createdAt;
   @Column(name = "due_at", nullable = false) private Instant dueAt;
   private Instant completedAt;
+  /**
+   * The highest SLA rung already raised for this approval - see {@code com.orisenc.workflow.sla}.
+   *
+   * <p>A column, not a response field. The {@code /api/tasks} contract is frozen, and an SLA ladder
+   * is not a reason to break it; the UI already computes its own countdown from {@code dueAt}.
+   */
+  @Column(name = "escalation_level", nullable = false) private int escalationLevel;
   @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
   @OrderBy("occurredAt ASC") private List<TaskHistoryEntity> history = new ArrayList<>();
 
@@ -43,9 +54,34 @@ public class TaskEntity {
     this.requestValue=requestValue; this.createdAt=createdAt; this.dueAt=dueAt; this.status=TaskStatus.PENDING;
   }
   public void addHistory(String action, String actor, String comment, Instant time, String correlationId) {
-    history.add(new TaskHistoryEntity(this, action, actor, comment, time, correlationId));
+    addHistory(action, actor, null, comment, time, correlationId);
+  }
+
+  /**
+   * Records an action taken under a delegation.
+   *
+   * <p>{@code onBehalfOf} is the assignee whose authority was used. The overload above is the same
+   * call for somebody acting as themselves, which is most of them.
+   */
+  public void addHistory(String action, String actor, String onBehalfOf, String comment, Instant time,
+      String correlationId) {
+    history.add(new TaskHistoryEntity(this, action, actor, onBehalfOf, comment, time, correlationId));
   }
   public void assignTo(String actor) { assignee = actor; }
+
+  /**
+   * Records that this approval has reached an SLA rung, and writes the history row that says so.
+   *
+   * <p>The actor is the service, not a person: nobody decided this, a deadline passed.
+   *
+   * @throws IllegalArgumentException when the rung is not above the one already recorded
+   */
+  public void recordEscalation(int level, String note, Instant time, String correlationId) {
+    if (level <= escalationLevel)
+      throw new IllegalArgumentException("This task has already reached SLA level " + escalationLevel);
+    escalationLevel = level;
+    addHistory("SLA_ESCALATED", SLA_ACTOR, note, time, correlationId);
+  }
   public void transition(TaskStatus newStatus, Instant time) { status = newStatus; if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.REJECTED) completedAt = time; }
   public String getId(){return id;} public long getVersion(){return version;} public UUID getOrganizationId(){return organizationId;}
   public UUID getCustomerId(){return customerId;} public UUID getVendorId(){return vendorId;} public String getTitle(){return title;}
@@ -53,6 +89,7 @@ public class TaskEntity {
   public TaskPriority getPriority(){return priority;} public TaskStatus getStatus(){return status;} public String getRequester(){return requester;}
   public String getAssignee(){return assignee;} public String getSummary(){return summary;} public String getRequestValue(){return requestValue;}
   public Instant getCreatedAt(){return createdAt;} public Instant getDueAt(){return dueAt;} public Instant getCompletedAt(){return completedAt;}
+  public int getEscalationLevel(){return escalationLevel;}
   public List<TaskHistoryEntity> getHistory(){return List.copyOf(history);}
 
   public void linkToMaster(UUID organizationId, UUID customerId, UUID vendorId) {
