@@ -4,7 +4,6 @@ import jakarta.persistence.*;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 @Entity
 @Table(name = "workflow_task", indexes = {
@@ -19,9 +18,9 @@ public class TaskEntity {
 
   @Id @Column(length = 40) private String id;
   @Version private long version;
-  @Column(name = "organization_id") private UUID organizationId;
-  @Column(name = "customer_id") private UUID customerId;
-  @Column(name = "vendor_id") private UUID vendorId;
+  @Column(name = "organization_id") private Long organizationId;
+  @Column(name = "customer_id") private Long customerId;
+  @Column(name = "vendor_id") private Long vendorId;
   @Column(nullable = false, length = 160) private String title;
   @Column(nullable = false, length = 120) private String reference;
   @Column(nullable = false, length = 60) private String department;
@@ -83,8 +82,8 @@ public class TaskEntity {
     addHistory("SLA_ESCALATED", SLA_ACTOR, note, time, correlationId);
   }
   public void transition(TaskStatus newStatus, Instant time) { status = newStatus; if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.REJECTED) completedAt = time; }
-  public String getId(){return id;} public long getVersion(){return version;} public UUID getOrganizationId(){return organizationId;}
-  public UUID getCustomerId(){return customerId;} public UUID getVendorId(){return vendorId;} public String getTitle(){return title;}
+  public String getId(){return id;} public long getVersion(){return version;} public Long getOrganizationId(){return organizationId;}
+  public Long getCustomerId(){return customerId;} public Long getVendorId(){return vendorId;} public String getTitle(){return title;}
   public String getReference(){return reference;} public String getDepartment(){return department;} public TaskType getType(){return type;}
   public TaskPriority getPriority(){return priority;} public TaskStatus getStatus(){return status;} public String getRequester(){return requester;}
   public String getAssignee(){return assignee;} public String getSummary(){return summary;} public String getRequestValue(){return requestValue;}
@@ -92,7 +91,7 @@ public class TaskEntity {
   public int getEscalationLevel(){return escalationLevel;}
   public List<TaskHistoryEntity> getHistory(){return List.copyOf(history);}
 
-  public void linkToMaster(UUID organizationId, UUID customerId, UUID vendorId) {
+  public void linkToMaster(Long organizationId, Long customerId, Long vendorId) {
     if (organizationId == null) throw new IllegalArgumentException("Organization id is required.");
     if (customerId != null && vendorId != null)
       throw new IllegalArgumentException("A workflow task cannot reference both a customer and a vendor.");
