@@ -6,7 +6,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.UUID;
 
 /**
  * A unit of work (USR-TASK-001), as distinct from an approval decision.
@@ -39,9 +38,9 @@ public class ProjectTaskEntity {
 
   @Id @Column(length = 40) private String id;
   @Version private long version;
-  @Column(name = "organization_id") private UUID organizationId;
-  @Column(name = "customer_id") private UUID customerId;
-  @Column(name = "vendor_id") private UUID vendorId;
+  @Column(name = "organization_id") private Long organizationId;
+  @Column(name = "customer_id") private Long customerId;
+  @Column(name = "vendor_id") private Long vendorId;
 
   /** Reserved for the project aggregate, which is designed but not yet built. Always null today. */
   @Column(name = "project_id", length = 40) private String projectId;
@@ -252,9 +251,9 @@ public class ProjectTaskEntity {
 
   public String getId() { return id; }
   public long getVersion() { return version; }
-  public UUID getOrganizationId() { return organizationId; }
-  public UUID getCustomerId() { return customerId; }
-  public UUID getVendorId() { return vendorId; }
+  public Long getOrganizationId() { return organizationId; }
+  public Long getCustomerId() { return customerId; }
+  public Long getVendorId() { return vendorId; }
   public String getProjectId() { return projectId; }
   public String getParentTaskId() { return parentTaskId; }
   public String getTitle() { return title; }
@@ -284,7 +283,7 @@ public class ProjectTaskEntity {
 
   public List<ProjectTaskChecklistItemEntity> getChecklist() { return List.copyOf(checklist); }
 
-  public void linkToMaster(UUID organizationId, UUID customerId, UUID vendorId) {
+  public void linkToMaster(Long organizationId, Long customerId, Long vendorId) {
     if (organizationId == null) throw new IllegalArgumentException("Organization id is required.");
     if (customerId != null && vendorId != null)
       throw new IllegalArgumentException("A project task cannot reference both a customer and a vendor.");
