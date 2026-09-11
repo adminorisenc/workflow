@@ -4,7 +4,7 @@ spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/workflow}
     username: ${SPRING_DATASOURCE_USERNAME:orisenc}
-    password: ${SPRING_DATASOURCE_PASSWORD:}
+    password: ${SPRING_DATASOURCE_PASSWORD:Postgres@123}
   jpa:
     hibernate:
       ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:update}
@@ -29,6 +29,9 @@ orisenc:
       - http://localhost:3000
   authorization:
     base-url: ${ORISENC_AUTHORIZATION_BASE_URL:http://localhost:8080/common-platform-service/ws}
+    client-id: ${ORISENC_AUTHORIZATION_CLIENT_ID:}
+    client-secret: ${ORISENC_AUTHORIZATION_CLIENT_SECRET:}
+    scope: ${ORISENC_AUTHORIZATION_SCOPE:}
     cache-ttl: 5m
 
   # Workflow raises notifications; it never delivers one. Disabled until an operator supplies a
