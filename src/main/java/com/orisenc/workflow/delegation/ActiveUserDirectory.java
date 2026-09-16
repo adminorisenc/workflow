@@ -35,10 +35,26 @@ public class ActiveUserDirectory {
         }).build();
   }
 
+  /**
+   * Whether Common Platform knows this person and considers them active.
+   *
+   * <p>A 404 is an <em>answer</em>, not a failure: the platform looked and there is no such user, so
+   * they are not an active one. Letting the 404 escape as an exception is what made adding a
+   * mistyped delegate report "the delegate's active status could not be confirmed, try again when
+   * Common Platform is available" - telling somebody to retry a thing that will never succeed, about
+   * a service that was working perfectly. Everything else still throws, because a timeout or a 500
+   * genuinely is "we could not find out", and a delegation must not be created on a guess.
+   */
   public boolean isActive(String preferredUsername) {
     if (client == null) throw new IllegalStateException("Common Platform service identity is not configured");
     var answer = client.get().uri(uri -> uri.path("/api/access/users/by-username/{username}/status")
-        .build(preferredUsername)).retrieve().body(UserStatus.class);
+        .build(preferredUsername))
+        .retrieve()
+        // Only 404. A 401 or 403 means this service could not ask - suppressing those would turn
+        // "Workflow cannot authenticate to Common Platform" into "that person is not active", which
+        // is a worse answer than the one being fixed: it blames a user for an infrastructure fault.
+        .onStatus(status -> status.value() == 404, (request, response) -> { })
+        .body(UserStatus.class);
     return answer != null && answer.active();
   }
 

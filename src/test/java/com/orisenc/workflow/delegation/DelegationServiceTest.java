@@ -191,6 +191,26 @@ class DelegationServiceTest {
   }
 
   @Test
+  void aDirectoryThatCouldNotAnswerIsReportedAsUnavailableAndNotAsAnInactiveUser() {
+    signedInAs(DELEGATOR, USER);
+    service = new DelegationService(entityManager,
+        new DelegationProperties(Duration.ofDays(90), null, "UTC", 500), published::add,
+        Clock.fixed(NOW, ZoneOffset.UTC), username -> { throw new IllegalStateException("boom"); });
+
+    // The pair to anInactiveDelegateIsRefused, and the distinction that matters to whoever reads the
+    // message: "not an active user" is a fact about the person and they should fix the name, while
+    // "could not be confirmed" is a fact about the platform and they should try later. Conflating
+    // them is how a mistyped delegate came back as "try again when Common Platform is available",
+    // about a service that was working perfectly - see ActiveUserDirectory.isActive, which now
+    // answers a 404 rather than throwing it.
+    assertThatThrownBy(() -> service.create(request(DelegationScope.WORK_ITEMS, null, null), DELEGATOR, "c"))
+        .isInstanceOf(ApiException.class)
+        .hasMessageContaining("could not be confirmed")
+        .satisfies(e -> assertThat(((ApiException) e).status())
+            .isEqualTo(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE));
+  }
+
+  @Test
   void aTaskTypeThatCannotMeanAnythingOnThisScopeIsRefused() {
     signedInAs(DELEGATOR, USER);
 
