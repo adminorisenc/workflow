@@ -89,7 +89,7 @@ public class ProjectTaskService {
   public record ListQuery(ProjectTaskStatus status, String ownerUserId, String relevantTeam,
       ProjectTaskType taskType, String parentTaskId, LinkedEntityType linkedEntityType,
       String linkedEntityId, Boolean openOnly, Boolean includeArchived, String search,
-      Integer page, Integer size) {}
+      Boolean mine, Integer page, Integer size) {}
 
   @Transactional(readOnly = true)
   public List<ProjectTaskSummary> list(ListQuery query, String actor, Set<String> permissions) {
@@ -105,6 +105,16 @@ public class ProjectTaskService {
       parameters.putAll(audience.parameters());
     }
     if (query.status() != null) { conditions.add("t.status = :status"); parameters.put("status", query.status()); }
+    if (Boolean.TRUE.equals(query.mine())) {
+      // "My work" is the work that is mine to do, which since named assignees is not the same as the
+      // work I own: a task somebody put me on is mine, and a list that hid it would make being
+      // assigned invisible to the person assigned. Kept separate from the owner filter rather than
+      // folded into it - a manager filtering by somebody's ownership means ownership.
+      conditions.add("(lower(t.ownerUserId) = :mine"
+          + " or exists (select 1 from ProjectTaskAssigneeEntity a"
+          + " where a.task = t and lower(a.username) = :mine))");
+      parameters.put("mine", actor == null ? "" : actor.toLowerCase(Locale.ROOT));
+    }
     if (notBlank(query.ownerUserId())) {
       // "me" resolves to the caller here rather than in the client. A UI cannot know which of
       // several identity strings the service stores against ownership, and a wrong guess returns an
@@ -351,6 +361,74 @@ public class ProjectTaskService {
     return detail(task, actor, permissions, cover);
   }
 
+  /**
+   * Who is on this item besides its owner. Gated on view, not on the manage code: knowing who else
+   * is working something you can already see is not itself sensitive, and hiding the list from the
+   * people on it would make "why can she see this?" unanswerable without an administrator.
+   */
+  @Transactional(readOnly = true)
+  public List<AssigneeResponse> assignees(String id, String actor) {
+    var permissions = ProjectTaskPermissions.granted();
+    var task = readable(id, actor, permissions, cover(actor));
+    return task.getAssignees().stream().map(ProjectTaskService::assignee).toList();
+  }
+
+  /**
+   * Puts a second person on the item.
+   *
+   * <p>Requires {@link ProjectTaskPermissions#ASSIGNEES_MANAGE} in the actor's own right. A delegate
+   * covering the owner deliberately cannot do this: cover is temporary, and letting it hand out
+   * standing access would make it permanent by the back door.
+   */
+  @Transactional
+  public ProjectTaskDetail addAssignee(String id, AssigneeRequest request, String actor,
+      String correlationId) {
+    if (request == null || !notBlank(request.username()))
+      throw ApiException.badRequest("A username is required.");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    requireAssigneeManagement(permissions);
+
+    String username = request.username().trim();
+    try {
+      task.addAssignee(username, actor, clock.instant());
+    } catch (IllegalArgumentException refused) {
+      // The entity's own words - "already owns this task", "already assigned to this task".
+      throw ApiException.conflict(refused.getMessage());
+    }
+    // TM-018: assignment changes belong in the immutable trail, not only in the current row.
+    task.addHistory("ASSIGNEE_ADDED", actor, username, clock.instant(), correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail removeAssignee(String id, String username, String actor,
+      String correlationId) {
+    if (!notBlank(username)) throw ApiException.badRequest("A username is required.");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    requireAssigneeManagement(permissions);
+
+    if (!task.removeAssignee(username.trim()))
+      throw ApiException.notFound("That person is not assigned to this task.");
+    task.addHistory("ASSIGNEE_REMOVED", actor, username.trim(), clock.instant(), correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  private static void requireAssigneeManagement(Set<String> permissions) {
+    if (!permissions.contains(ProjectTaskPermissions.ASSIGNEES_MANAGE))
+      throw ApiException.forbidden("Your role does not permit changing who is assigned to work items.");
+  }
+
+  private static AssigneeResponse assignee(ProjectTaskAssigneeEntity entry) {
+    return new AssigneeResponse(entry.getId(), entry.getUsername(), entry.getAddedBy(),
+        entry.getAddedAt());
+  }
+
   @Transactional
   public ProjectTaskDetail toggleChecklistItem(String id, Long itemId, ChecklistToggleRequest request,
       String actor, String correlationId) {
@@ -537,6 +615,8 @@ public class ProjectTaskService {
             item.getCompletedAt())).toList(),
         task.getComments().stream().map(entry -> new CommentResponse(entry.getId(), entry.getAuthor(),
             entry.getBody(), entry.getCreatedAt())).toList(),
+        task.getAssignees().stream().map(ProjectTaskService::assignee).toList(),
+        permissions.contains(ProjectTaskPermissions.ASSIGNEES_MANAGE),
         task.getHistory().stream().map(event -> new HistoryResponse(event.getId(), event.getAction(),
             event.getFromStatus(), event.getToStatus(), event.getActor(), event.getOnBehalfOf(),
             event.getReason(), event.getOccurredAt(), event.getCorrelationId())).toList());

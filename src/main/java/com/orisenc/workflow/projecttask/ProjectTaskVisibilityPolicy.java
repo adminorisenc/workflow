@@ -17,6 +17,17 @@ import java.util.Set;
  * permission. Everything that reads work items goes through {@link #mayView} so that list, detail,
  * search and child lookups cannot drift apart.
  *
+ * <h2>Named assignees</h2>
+ *
+ * <p>An item's owner is one person (TM-003), because the SLA ladder, delegation and claiming each
+ * need a single answer to "who". People working it alongside the owner are named on the item
+ * instead, and a named assignee both sees it - whatever its audience says - and may progress it,
+ * still needing {@link ProjectTaskPermissions#EXECUTE} of their own.
+ *
+ * <p>Being named grants task metadata, status and comments and nothing else. Policy note P-04 draws
+ * the same boundary for the audience enum, and TM-012/TM-014 make it critical: customer identity and
+ * customer fields are a separate entitlement, never inferred from being on a task.
+ *
  * <h2>Delegation</h2>
  *
  * <p>Every method takes the delegation cover currently handing work to the actor (REQ-0027). A
@@ -77,6 +88,7 @@ public final class ProjectTaskVisibilityPolicy {
       List<DelegationCover> cover) {
     if (!permissions.contains(ProjectTaskPermissions.VIEW)) return false;
     if (isOwnerOrCreator(task, actor)) return true;
+    if (task.isAssignee(actor)) return true;
     if (coveredBy(task, cover)) return true;
     return switch (task.getVisibility()) {
       case ALL_TEAMS -> true;
@@ -107,7 +119,7 @@ public final class ProjectTaskVisibilityPolicy {
     if (!mayView(task, actor, permissions, cover)) return false;
     if (permissions.contains(ProjectTaskPermissions.MANAGE)) return true;
     if (!permissions.contains(ProjectTaskPermissions.EXECUTE)) return false;
-    return isOwner(task, actor) || coveredBy(task, cover);
+    return isOwner(task, actor) || task.isAssignee(actor) || coveredBy(task, cover);
   }
 
   /**
@@ -140,6 +152,10 @@ public final class ProjectTaskVisibilityPolicy {
    */
   public static String actingFor(ProjectTaskEntity task, String actor, List<DelegationCover> cover) {
     if (isOwner(task, actor)) return null;
+    // A named assignee holds the item in their own right, so there is nobody to attribute to. Checked
+    // before the cover lookup: someone who is both an assignee and a delegate is acting as an
+    // assignee, and recording a delegator would put a name on the history row that did not act.
+    if (task.isAssignee(actor)) return null;
     return cover.stream()
         .filter(entry -> entry.isFor(task.getOwnerUserId()))
         .filter(entry -> entry.covers(task.getTaskType().name(), task.getRelevantTeam()))
@@ -164,6 +180,10 @@ public final class ProjectTaskVisibilityPolicy {
     var clauses = new ArrayList<String>();
     clauses.add("lower(t.ownerUserId) = :actor");
     clauses.add("lower(t.createdBy) = :actor");
+    // The database half of `task.isAssignee(actor)` in mayView. An exists subquery rather than a join
+    // so an item with several assignees is still one row in the result.
+    clauses.add("exists (select 1 from ProjectTaskAssigneeEntity a"
+        + " where a.task = t and lower(a.username) = :actor)");
     clauses.add("t.visibility = com.orisenc.workflow.projecttask.ProjectTaskVisibility.ALL_TEAMS");
     parameters.put("actor", actor == null ? "" : actor.toLowerCase(java.util.Locale.ROOT));
     if (permissions.contains(ProjectTaskPermissions.VIEW_TEAM))

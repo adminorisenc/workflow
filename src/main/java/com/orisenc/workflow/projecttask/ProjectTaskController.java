@@ -49,10 +49,11 @@ public class ProjectTaskController {
       @RequestParam(required = false) Boolean openOnly,
       @RequestParam(required = false) Boolean includeArchived,
       @RequestParam(required = false) String q,
+      @RequestParam(required = false) Boolean mine,
       @RequestParam(required = false) Integer page,
       @RequestParam(required = false) Integer size) {
     var query = new ProjectTaskService.ListQuery(status, owner, team, type, parent, linkedType, linkedId,
-        openOnly, includeArchived, q, page, size);
+        openOnly, includeArchived, q, mine, page, size);
     return service.list(query, actor(), ProjectTaskPermissions.granted());
   }
 
@@ -110,6 +111,32 @@ public class ProjectTaskController {
   @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
   public ProjectTaskDetail comment(@PathVariable String id, @RequestBody CommentRequest body) {
     return service.comment(id, body, actor());
+  }
+
+  /* ------------------------------------------------------------------------- assignees */
+
+  /**
+   * Gated on view rather than the manage code: seeing who else is on an item you can already see is
+   * not sensitive. Changing the list is, which is why the two below need their own permission.
+   */
+  @GetMapping("/{id}/assignees")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public List<AssigneeResponse> assignees(@PathVariable String id) {
+    return service.assignees(id, actor());
+  }
+
+  @PostMapping(path = "/{id}/assignees", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.ASSIGNEES_MANAGE + "')")
+  public ProjectTaskDetail addAssignee(@PathVariable String id, @RequestBody AssigneeRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.addAssignee(id, body, actor(), correlationId(correlationId));
+  }
+
+  @DeleteMapping("/{id}/assignees/{username}")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.ASSIGNEES_MANAGE + "')")
+  public ProjectTaskDetail removeAssignee(@PathVariable String id, @PathVariable String username,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.removeAssignee(id, username, actor(), correlationId(correlationId));
   }
 
   @PostMapping(path = "/{id}/checklist/{itemId}", consumes = "application/json")

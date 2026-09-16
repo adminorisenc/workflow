@@ -149,8 +149,7 @@ class DelegatedActionTest {
     var detail = workItems.get("WRK-1", DELEGATE, WORKER);
 
     assertThat(detail.mayAct()).isTrue();
-    assertThat(workItems.list(new ProjectTaskService.ListQuery(null, null, null, null, null, null,
-        null, null, null, null, null, null), DELEGATE, WORKER))
+    assertThat(workItems.list(new ProjectTaskService.ListQuery(null, null, null, null, null, null, null, null, null, null, null, null, null), DELEGATE, WORKER))
         .extracting(ProjectTaskDtos.ProjectTaskSummary::id).containsExactly("WRK-1");
   }
 
@@ -240,8 +239,7 @@ class DelegatedActionTest {
     delegateWorkItems(null);
     signedInAs(STRANGER, WORKER);
 
-    assertThat(workItems.list(new ProjectTaskService.ListQuery(null, null, null, null, null, null,
-        null, null, null, null, null, null), STRANGER, WORKER)).isEmpty();
+    assertThat(workItems.list(new ProjectTaskService.ListQuery(null, null, null, null, null, null, null, null, null, null, null, null, null), STRANGER, WORKER)).isEmpty();
   }
 
   /**

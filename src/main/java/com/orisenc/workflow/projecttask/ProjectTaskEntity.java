@@ -105,6 +105,13 @@ public class ProjectTaskEntity {
   @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
   @OrderBy("sequenceNo ASC") private List<ProjectTaskChecklistItemEntity> checklist = new ArrayList<>();
 
+  /**
+   * People working this item alongside its owner. Ordered by name so the panel and the API agree on
+   * a stable order without either sorting it themselves.
+   */
+  @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
+  @OrderBy("username ASC") private List<ProjectTaskAssigneeEntity> assignees = new ArrayList<>();
+
   protected ProjectTaskEntity() {}
 
   public ProjectTaskEntity(String id, String title, String description, ProjectTaskType taskType,
@@ -231,6 +238,44 @@ public class ProjectTaskEntity {
   }
 
   /**
+   * Puts a second person on this item.
+   *
+   * <p>Refuses the owner: they already hold it, and a row saying otherwise would make "who is on
+   * this task" two different answers depending on which one you read. Refuses a repeat for the same
+   * reason the unique constraint does - the entity should say no before the database has to.
+   *
+   * @throws IllegalArgumentException when the person owns the item or is already on it
+   */
+  public ProjectTaskAssigneeEntity addAssignee(String username, String addedBy, Instant time) {
+    if (username == null || username.isBlank())
+      throw new IllegalArgumentException("A username is required.");
+    String trimmed = username.trim();
+    if (ownerUserId != null && ownerUserId.equalsIgnoreCase(trimmed))
+      throw new IllegalArgumentException(trimmed + " already owns this task.");
+    if (isAssignee(trimmed))
+      throw new IllegalArgumentException(trimmed + " is already assigned to this task.");
+    var assignee = new ProjectTaskAssigneeEntity(this, trimmed, addedBy, time);
+    assignees.add(assignee);
+    return assignee;
+  }
+
+  /** Removes a person from this item. Returns false when they were not on it. */
+  public boolean removeAssignee(String username) {
+    return assignees.removeIf(entry -> entry.getUsername().equalsIgnoreCase(username));
+  }
+
+  /**
+   * Whether this person is named on the item beyond its owner.
+   *
+   * <p>Case-insensitive, matching how {@code ownerUserId} and {@code createdBy} are compared in
+   * {@link ProjectTaskVisibilityPolicy} - one kind of identity comparison across the item.
+   */
+  public boolean isAssignee(String username) {
+    return username != null
+        && assignees.stream().anyMatch(entry -> entry.getUsername().equalsIgnoreCase(username));
+  }
+
+  /**
    * True when every item marked required is ticked. Consulted before allowing completion so that a
    * checklist is a real gate rather than a decorative list.
    */
@@ -282,6 +327,8 @@ public class ProjectTaskEntity {
   public List<ProjectTaskCommentEntity> getComments() { return List.copyOf(comments); }
 
   public List<ProjectTaskChecklistItemEntity> getChecklist() { return List.copyOf(checklist); }
+
+  public List<ProjectTaskAssigneeEntity> getAssignees() { return List.copyOf(assignees); }
 
   public void linkToMaster(Long organizationId, Long customerId, Long vendorId) {
     if (organizationId == null) throw new IllegalArgumentException("Organization id is required.");

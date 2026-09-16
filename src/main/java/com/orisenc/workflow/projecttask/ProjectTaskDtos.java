@@ -44,6 +44,11 @@ public final class ProjectTaskDtos {
 
   public record ChecklistToggleRequest(Boolean completed) {}
 
+  /** Put someone on a work item. The username is the identity, as everywhere else on the item. */
+  public record AssigneeRequest(String username) {}
+
+  public record AssigneeResponse(Long id, String username, String addedBy, Instant addedAt) {}
+
   /**
    * One event on the item.
    *
@@ -94,5 +99,6 @@ public final class ProjectTaskDtos {
       int escalationLevel, List<ProjectTaskStatus> allowedNextStatuses, boolean mayAct, boolean mayClaim,
       boolean requiredChecklistComplete, List<ProjectTaskSummary> children,
       List<ChecklistItemResponse> checklist, List<CommentResponse> comments,
+      List<AssigneeResponse> assignees, boolean mayManageAssignees,
       List<HistoryResponse> history) {}
 }

@@ -30,6 +30,16 @@ public final class ProjectTaskPermissions {
   public static final String EXECUTE = "platform.work.execute";
   /** Reassign, archive and act on items you do not own. Team-lead level. */
   public static final String MANAGE = "platform.work.manage";
+  /**
+   * Put someone else on a work item, or take them off.
+   *
+   * <p>Separate from {@link #MANAGE} on purpose, and separate from {@link #EXECUTE} for the same
+   * reason {@code sales.lead.collaborators.manage} is: widening who else may see and progress a
+   * record is a supervisory decision, not part of working it. Holding it does <em>not</em> lift the
+   * visibility policy - unlike the Sales equivalent, this grants no bypass, because {@link #MANAGE}
+   * already occupies that role here and a second bypass would be two answers to one question.
+   */
+  public static final String ASSIGNEES_MANAGE = "platform.work.assignees.manage";
 
   public static Set<String> granted() {
     var authentication = SecurityContextHolder.getContext().getAuthentication();
