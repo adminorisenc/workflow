@@ -22,7 +22,9 @@ public final class ProjectTaskDtos {
       String title, String description, ProjectTaskType taskType, TaskPriority priority,
       ProjectTaskVisibility visibility, String relevantTeam, String ownerUserId,
       LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
-      String parentTaskId, Instant dueAt, List<ChecklistItemInput> checklist) {}
+      String parentTaskId, Instant dueAt, List<ChecklistItemInput> checklist,
+      /* TM-002's customer link. Optional, and a task carries a customer or a vendor, never both. */
+      Long organizationId, Long customerId, Long vendorId) {}
 
   /**
    * Starts the order-to-cash chain for one customer order.
@@ -68,6 +70,15 @@ public final class ProjectTaskDtos {
   public record LinkedEntityResponse(LinkedEntityType type, String id, String reference) {}
 
   /**
+   * The business party this task is about, or null when the viewer is not entitled to know.
+   *
+   * <p>TM-012 keeps customer identity with the people doing the work, so a viewer who reaches the
+   * task only through its audience gets null here rather than a redacted shape - an absent field
+   * says "not for you" without also saying "and there is one".
+   */
+  public record MasterDataResponse(Long organizationId, Long customerId, Long vendorId) {}
+
+  /**
    * List row. Omits history, comments and checklist so a queue does not pay for detail nobody read.
    *
    * <p>{@code escalationLevel} is the highest SLA rung raised on this item: 0 for one still inside
@@ -100,5 +111,8 @@ public final class ProjectTaskDtos {
       boolean requiredChecklistComplete, List<ProjectTaskSummary> children,
       List<ChecklistItemResponse> checklist, List<CommentResponse> comments,
       List<AssigneeResponse> assignees, boolean mayManageAssignees,
+      /** Null unless the viewer is entitled to the task - see ProjectTaskVisibilityPolicy#isEntitled. */
+      MasterDataResponse masterData,
+      /** Empty for an audience-only viewer: an audit trail is not metadata, status or a comment. */
       List<HistoryResponse> history) {}
 }

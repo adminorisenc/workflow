@@ -188,6 +188,9 @@ public class ProjectTaskService {
         request.linkedEntityType(), blankToNull(request.linkedEntityId()), blankToNull(request.linkedEntityRef()),
         parentId, now, request.dueAt());
 
+    // TM-002's customer link. The entity refuses a task that claims both a customer and a vendor.
+    if (request.organizationId() != null)
+      task.linkToMaster(request.organizationId(), request.customerId(), request.vendorId());
     if (request.checklist() != null) {
       for (var item : request.checklist()) {
         if (item == null || !notBlank(item.title())) continue;
@@ -599,6 +602,9 @@ public class ProjectTaskService {
   private ProjectTaskDetail detail(ProjectTaskEntity task, String actor, Set<String> permissions,
       List<DelegationCover> cover) {
     Instant now = clock.instant();
+    // Seeing a task because somebody published it to everyone is not the same as being on it. The
+    // audit trail and the linked customer hang off this; TM-014 and TM-012 draw the line here.
+    boolean entitled = ProjectTaskVisibilityPolicy.isEntitled(task, actor, permissions, cover);
     var childEntities = children(task.getId());
     var childSummaries = childEntities.stream().map(child -> summary(child, 0, now)).toList();
     return new ProjectTaskDetail(task.getId(), task.getVersion(), task.getTitle(), task.getDescription(),
@@ -617,9 +623,12 @@ public class ProjectTaskService {
             entry.getBody(), entry.getCreatedAt())).toList(),
         task.getAssignees().stream().map(ProjectTaskService::assignee).toList(),
         permissions.contains(ProjectTaskPermissions.ASSIGNEES_MANAGE),
-        task.getHistory().stream().map(event -> new HistoryResponse(event.getId(), event.getAction(),
+        entitled ? new MasterDataResponse(task.getOrganizationId(), task.getCustomerId(),
+            task.getVendorId()) : null,
+        entitled ? task.getHistory().stream().map(event -> new HistoryResponse(event.getId(), event.getAction(),
             event.getFromStatus(), event.getToStatus(), event.getActor(), event.getOnBehalfOf(),
-            event.getReason(), event.getOccurredAt(), event.getCorrelationId())).toList());
+            event.getReason(), event.getOccurredAt(), event.getCorrelationId())).toList()
+            : List.of());
   }
 
   private static LinkedEntityResponse linked(ProjectTaskEntity task) {

@@ -12,6 +12,14 @@ public enum ProjectTaskVisibility {
   INDIVIDUAL,
   /** Plus the task's relevant team. */
   RELEVANT_TEAM,
-  /** Any user holding task view permission. Metadata and status only. */
+  /**
+   * Any user holding task view permission - metadata, status and comments, and no more.
+   *
+   * <p>"No more" is enforced, not just described: a viewer who reaches a task only through its
+   * audience gets no audit history and no linked customer. See
+   * {@link ProjectTaskVisibilityPolicy#isEntitled}. Before that it was a comment the service did not
+   * honour, which is the same defect the approval task family shipped and this package was rebuilt
+   * to remove.
+   */
   ALL_TEAMS
 }

@@ -273,6 +273,67 @@ class ProjectTaskAssigneeServiceTest {
         .satisfies(e -> assertThat(((ApiException) e).status()).isEqualTo(HttpStatus.BAD_REQUEST));
   }
 
+  /* -------------------------------------------- what a broad audience does and does not get */
+
+  @Test
+  void anAudienceOnlyViewerGetsMetadataAndCommentsButNoHistoryOrCustomer() {
+    var task = workItem(ProjectTaskVisibility.ALL_TEAMS);
+    task.linkToMaster(7L, 42L, null);
+    entityManager.flush();
+
+    // STRANGER reaches this only because somebody published it to everyone. The enum has always said
+    // "metadata and status only"; until now the service handed over the audit trail as well.
+    signedInAs(STRANGER, WORKER);
+    var seen = workItems.get("WRK-1", STRANGER, WORKER);
+
+    assertThat(seen.title()).isEqualTo("Deliver order SO-90812");
+    assertThat(seen.status()).isNotNull();
+    assertThat(seen.history()).as("an audit trail is not metadata, status or a comment").isEmpty();
+    assertThat(seen.masterData()).as("TM-012 keeps the customer with the people doing the work").isNull();
+  }
+
+  @Test
+  void theOwnerAndAnAssigneeBothGetTheHistoryAndTheCustomer() {
+    var task = workItem(ProjectTaskVisibility.ALL_TEAMS);
+    task.linkToMaster(7L, 42L, null);
+    entityManager.flush();
+
+    signedInAs(OWNER, WORKER);
+    var asOwner = workItems.get("WRK-1", OWNER, WORKER);
+    assertThat(asOwner.history()).isNotEmpty();
+    assertThat(asOwner.masterData().customerId()).isEqualTo(42L);
+
+    signedInAs(LEAD, ASSIGNING_MANAGER);
+    workItems.addAssignee("WRK-1", new ProjectTaskDtos.AssigneeRequest(MATE), LEAD, "c");
+
+    // Being put on a task is what makes it yours, so it carries the same entitlement as owning it.
+    signedInAs(MATE, WORKER);
+    var asAssignee = workItems.get("WRK-1", MATE, WORKER);
+    assertThat(asAssignee.history()).isNotEmpty();
+    assertThat(asAssignee.masterData().customerId()).isEqualTo(42L);
+  }
+
+  @Test
+  void aTaskCanCarryTheCustomerItIsAboutAndRefusesToCarryBoth() {
+    signedInAs(OWNER, Set.of(ProjectTaskPermissions.VIEW, ProjectTaskPermissions.CREATE,
+        ProjectTaskPermissions.EXECUTE));
+    var created = workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
+        "Chase the PO", "Customer has not sent it.", ProjectTaskType.FOLLOW_UP, TaskPriority.MEDIUM,
+        ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.CUSTOMER, "42",
+        "Northstar Medical", null, DUE, null, 7L, 42L, null), OWNER, "c");
+
+    // The column existed on the entity and no create path had ever populated it, so TM-002's
+    // customer link was modelled and never wired.
+    assertThat(created.masterData().customerId()).isEqualTo(42L);
+    assertThat(created.masterData().organizationId()).isEqualTo(7L);
+
+    assertThatThrownBy(() -> workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
+        "Both", "Not allowed.", ProjectTaskType.FOLLOW_UP, TaskPriority.MEDIUM,
+        ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.NONE, null, null,
+        null, DUE, null, 7L, 42L, 9L), OWNER, "c"))
+        .isInstanceOf(Exception.class);
+  }
+
   /* ------------------------------------------------------------------------- the trail */
 
   @Test

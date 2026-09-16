@@ -99,6 +99,23 @@ public final class ProjectTaskVisibilityPolicy {
   }
 
   /**
+   * Whether the actor has a connection to this task, rather than merely being allowed to look at it.
+   *
+   * <p>The distinction {@link ProjectTaskVisibility#ALL_TEAMS} needs and did not have. Seeing a task
+   * because somebody published it to everyone is not the same as owning it, being assigned to it,
+   * raising it, covering for its owner or managing the queue - and TM-014 draws the line in exactly
+   * that place: a broad audience carries task metadata, status and safe comments, and nothing else.
+   *
+   * <p>Two things hang off it: the audit history, which is not any of those three, and the linked
+   * customer, which TM-012 reserves to the people actually doing the work.
+   */
+  public static boolean isEntitled(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
+    if (permissions.contains(ProjectTaskPermissions.MANAGE)) return true;
+    return isOwnerOrCreator(task, actor) || task.isAssignee(actor) || coveredBy(task, cover);
+  }
+
+  /**
    * Whether the actor may change the item's state.
    *
    * <p>Being able to see a task never implies being able to move it: an all-teams item is readable
