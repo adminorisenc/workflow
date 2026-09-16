@@ -140,6 +140,70 @@ public final class ProjectTaskVisibilityPolicy {
   }
 
   /**
+   * Whether the actor may change the item's fields (TM-A03).
+   *
+   * <p>Three deliberate narrowings, each different from {@link #mayAct}:
+   *
+   * <ol>
+   *   <li><b>Only while the item is open.</b> A Completed or Cancelled item must be reopened first,
+   *       which is an ordinary transition and therefore demands a comment - so a closed record that
+   *       changes always carries the reason it was reopened.
+   *   <li><b>The owner or the creator, not a named assignee.</b> Editing changes what the work
+   *       <em>is</em>; an assignee was put on the work as defined and progresses it, which is what
+   *       {@link #mayAct} grants them.
+   *   <li><b>No delegation.</b> A delegation is cover for somebody's workload - it lets a delegate
+   *       move work along while its owner is away, not redefine the work in their absence.
+   * </ol>
+   *
+   * <p>A manager may edit anything they can see, which is what makes correcting a bad due date or a
+   * wrong team possible without first taking ownership of the item.
+   */
+  public static boolean mayEdit(ProjectTaskEntity task, String actor, Set<String> permissions) {
+    return mayEdit(task, actor, permissions, List.of());
+  }
+
+  public static boolean mayEdit(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
+    if (!task.open()) return false;
+    if (!mayView(task, actor, permissions, cover)) return false;
+    if (permissions.contains(ProjectTaskPermissions.MANAGE)) return true;
+    if (!permissions.contains(ProjectTaskPermissions.EXECUTE)) return false;
+    return isOwnerOrCreator(task, actor);
+  }
+
+  /**
+   * Whether the actor may see who worked on this item and for how long (TM-A05, TM-A06).
+   *
+   * <p>Narrower than seeing the item, and that is the whole point. An {@code ALL_TEAMS} item is
+   * readable across the organization; "this named person spent fourteen hours on it" should not
+   * therefore be. TM-014 draws exactly this line for customer data - a broad audience carries task
+   * metadata, status and safe comments, and nothing else - and individual effort belongs on the far
+   * side of it.
+   *
+   * <p>Gated on {@link #isEntitled}, the same test the audit history already uses, so the two cannot
+   * drift into disagreeing about who is close enough to this item to see how it went.
+   *
+   * <h3>Narrower than the agreed rule, knowingly</h3>
+   *
+   * <p>The agreed rule is "the owner, the relevant team and leads". Team membership cannot be
+   * enforced today - no user record in the platform carries a team or department, which is the same
+   * limitation documented on this class for {@link ProjectTaskVisibility#RELEVANT_TEAM} - so
+   * "relevant team" currently resolves to the people actually named on the item: its owner, its
+   * creator and its assignees, plus {@link ProjectTaskPermissions#MANAGE} for leads.
+   *
+   * <p>The alternative was to accept {@link ProjectTaskPermissions#VIEW_TEAM} here, but that
+   * permission is not scoped to a team either, so it would have handed every team viewer every
+   * item's timesheet - wider than the rule rather than narrower. On a question about individual
+   * effort, erring closed is the safer error. Widen it here when a department lands on the user
+   * record; this one method is the whole change.
+   */
+  public static boolean mayViewEffort(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
+    return mayView(task, actor, permissions, cover)
+        && isEntitled(task, actor, permissions, cover);
+  }
+
+  /**
    * Whether the actor may take an unowned item.
    *
    * <p>Claiming is the one action deliberately open to anyone who can see the item and execute work:

@@ -16,9 +16,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -188,6 +190,8 @@ public class ProjectTaskService {
         request.linkedEntityType(), blankToNull(request.linkedEntityId()), blankToNull(request.linkedEntityRef()),
         parentId, now, request.dueAt());
 
+    // TM-A02 and TM-A01: optional at creation, editable for the rest of the item's life.
+    task.describe(request.summary(), request.plannedStartAt(), request.plannedEndAt());
     // TM-002's customer link. The entity refuses a task that claims both a customer and a vendor.
     if (request.organizationId() != null)
       task.linkToMaster(request.organizationId(), request.customerId(), request.vendorId());
@@ -459,6 +463,269 @@ public class ProjectTaskService {
     return detail(task, actor, permissions, cover);
   }
 
+  // ---------------------------------------------------------------- editing (TM-A03)
+
+  /**
+   * Edits an open work item, recording every field that changed.
+   *
+   * <p>The entity decides what actually changed and this method turns each of those into its own
+   * history row. One row per field rather than one per edit: an activity feed saying "the task was
+   * edited" answers nothing, and TM-018 asks for who changed what.
+   *
+   * <p>A no-op edit writes nothing. Somebody opening the form and saving it unchanged should not
+   * leave a mark on the audit trail claiming they did something.
+   */
+  @Transactional
+  public ProjectTaskDetail update(String id, UpdateProjectTaskRequest request, String actor,
+      String correlationId) {
+    if (request == null) throw ApiException.badRequest("A work item body is required");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    assertVersion(task, request.expectedVersion());
+    if (!ProjectTaskVisibilityPolicy.mayEdit(task, actor, permissions, cover)) {
+      // Two different refusals, because they need two different answers from the person reading
+      // them: one means reopen it first, the other means ask somebody else.
+      if (!task.open())
+        throw ApiException.conflict(
+            "This work item is closed. Reopen it before changing its details.");
+      throw ApiException.forbidden(
+          "Only the owner of this work item, whoever raised it, or a manager can change its details.");
+    }
+
+    String newParent = blankToNull(request.parentTaskId());
+    // Checked before the entity applies anything: a cycle needs the other rows in the table to
+    // detect, which is knowledge the entity does not and should not have.
+    if (newParent != null && !newParent.equals(task.getParentTaskId()))
+      assertUsableParent(newParent, task.getId());
+
+    List<ProjectTaskEntity.FieldChange> changes;
+    try {
+      changes = task.applyEdit(new ProjectTaskEntity.Edit(request.title(), request.summary(),
+          request.description(), request.taskType(), request.priority(), request.visibility(),
+          request.relevantTeam(), request.linkedEntityType(), request.linkedEntityId(),
+          request.linkedEntityRef(), newParent, request.dueAt(), request.plannedStartAt(),
+          request.plannedEndAt(), request.startedAt(), request.completedAt()));
+    } catch (IllegalArgumentException rejected) {
+      throw ApiException.badRequest(rejected.getMessage());
+    }
+
+    Instant now = clock.instant();
+    String onBehalfOf = ProjectTaskVisibilityPolicy.actingFor(task, actor, cover);
+    for (var change : changes)
+      task.addHistory("FIELD_CHANGED", actor, onBehalfOf, describe(change), now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  private static String describe(ProjectTaskEntity.FieldChange change) {
+    if (change.from() == null) return change.field() + " set to " + change.to();
+    if (change.to() == null) return change.field() + " cleared, was " + change.from();
+    return change.field() + " changed from " + change.from() + " to " + change.to();
+  }
+
+  // ---------------------------------------------------------------- time and travel
+
+  /**
+   * Records effort against the item (TM-A05).
+   *
+   * <p>Gated on {@link ProjectTaskVisibilityPolicy#mayAct} rather than on view: logging hours is a
+   * claim about work done, and only the people actually working an item are in a position to make
+   * one.
+   *
+   * <p>{@code username} defaults to the caller. Naming somebody else is a manager's act - attributing
+   * hours to a person is a statement about that person, and anyone who could do it freely could put
+   * a day's work against a colleague who was on leave.
+   */
+  @Transactional
+  public ProjectTaskDetail logTime(String id, TimeEntryRequest request, String actor,
+      String correlationId) {
+    if (request == null) throw ApiException.badRequest("A time entry is required");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    assertMayRecord(task, actor, permissions, cover, "log time against");
+
+    String username = blankToNull(request.username());
+    if (username != null && !username.equalsIgnoreCase(actor)
+        && !permissions.contains(ProjectTaskPermissions.MANAGE))
+      throw ApiException.forbidden("You can only log time against your own name.");
+
+    Instant now = clock.instant();
+    var entry = guard(() -> task.logTime(username == null ? actor : username, request.workDate(),
+        minutes(request.durationMinutes(), "Time spent"), request.note(), actor, now));
+    entityManager.flush();
+    task.addHistory("TIME_LOGGED", actor,
+        entry.getUsername() + " logged " + duration(entry.getDurationMinutes()) + " on "
+            + entry.getWorkDate(), now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  /**
+   * Corrects an entry somebody logged.
+   *
+   * <p>Restricted to the person it belongs to - the worker it is attributed to, or whoever recorded
+   * it for them. A manager is deliberately not included: a correction is a restatement of what
+   * somebody did, and the trail is worth more if only they can make it.
+   */
+  @Transactional
+  public ProjectTaskDetail correctTime(String id, Long entryId, TimeEntryRequest request,
+      String actor, String correlationId) {
+    if (request == null) throw ApiException.badRequest("A time entry is required");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    var entry = guard(() -> task.timeEntry(entryId));
+    assertOwnEntry(entry.belongsTo(actor), "time");
+
+    Instant now = clock.instant();
+    int previous = entry.getDurationMinutes();
+    guard(() -> {
+      task.correctTime(entry, request.workDate(), minutes(request.durationMinutes(), "Time spent"),
+          request.note(), now);
+      return entry;
+    });
+    task.addHistory("TIME_CORRECTED", actor,
+        entry.getUsername() + " corrected " + duration(previous) + " to "
+            + duration(entry.getDurationMinutes()) + " on " + entry.getWorkDate(), now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail removeTime(String id, Long entryId, String actor, String correlationId) {
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    var entry = guard(() -> task.timeEntry(entryId));
+    assertOwnEntry(entry.belongsTo(actor), "time");
+
+    Instant now = clock.instant();
+    String removed = entry.getUsername() + "'s " + duration(entry.getDurationMinutes()) + " on "
+        + entry.getWorkDate();
+    guard(() -> { task.removeTimeEntry(entry); return entry; });
+    // The entry goes, the fact that it existed does not: a deletion nobody can see is a hole in the
+    // total that the audit trail cannot explain.
+    task.addHistory("TIME_REMOVED", actor, "Removed " + removed, now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  /** Records a journey made for the item (TM-A06). Same gate and same attribution rule as time. */
+  @Transactional
+  public ProjectTaskDetail logTravel(String id, TravelEntryRequest request, String actor,
+      String correlationId) {
+    if (request == null) throw ApiException.badRequest("A travel entry is required");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    assertMayRecord(task, actor, permissions, cover, "log travel against");
+
+    String traveller = blankToNull(request.traveller());
+    if (traveller != null && !traveller.equalsIgnoreCase(actor)
+        && !permissions.contains(ProjectTaskPermissions.MANAGE))
+      throw ApiException.forbidden("You can only log travel against your own name.");
+
+    Instant now = clock.instant();
+    var entry = guard(() -> task.logTravel(traveller == null ? actor : traveller,
+        request.travelDate(), request.fromLocation(), request.toLocation(), request.purpose(),
+        minutes(request.travelMinutes(), "Travel time"), request.expenseAmount(),
+        request.currencyCode(), request.voucherRef(), actor, now));
+    entityManager.flush();
+    task.addHistory("TRAVEL_LOGGED", actor,
+        entry.getTraveller() + " travelled " + entry.getFromLocation() + " to "
+            + entry.getToLocation() + " on " + entry.getTravelDate() + ", "
+            + duration(entry.getTravelMinutes()) + ", " + entry.getCurrencyCode() + " "
+            + entry.getExpenseAmount().toPlainString(), now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail correctTravel(String id, Long entryId, TravelEntryRequest request,
+      String actor, String correlationId) {
+    if (request == null) throw ApiException.badRequest("A travel entry is required");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    var entry = guard(() -> task.travelEntry(entryId));
+    assertOwnEntry(entry.belongsTo(actor), "travel");
+
+    Instant now = clock.instant();
+    String previous = duration(entry.getTravelMinutes()) + " and " + entry.getCurrencyCode() + " "
+        + entry.getExpenseAmount().toPlainString();
+    guard(() -> {
+      task.correctTravel(entry, request.travelDate(), request.fromLocation(), request.toLocation(),
+          request.purpose(), minutes(request.travelMinutes(), "Travel time"),
+          request.expenseAmount(), request.currencyCode(), request.voucherRef(), now);
+      return entry;
+    });
+    task.addHistory("TRAVEL_CORRECTED", actor,
+        entry.getTraveller() + " corrected " + previous + " to " + duration(entry.getTravelMinutes())
+            + " and " + entry.getCurrencyCode() + " " + entry.getExpenseAmount().toPlainString(),
+        now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail removeTravel(String id, Long entryId, String actor, String correlationId) {
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    var entry = guard(() -> task.travelEntry(entryId));
+    assertOwnEntry(entry.belongsTo(actor), "travel");
+
+    Instant now = clock.instant();
+    String removed = entry.getTraveller() + "'s journey on " + entry.getTravelDate() + ", "
+        + entry.getCurrencyCode() + " " + entry.getExpenseAmount().toPlainString();
+    guard(() -> { task.removeTravelEntry(entry); return entry; });
+    task.addHistory("TRAVEL_REMOVED", actor, "Removed " + removed, now, correlationId);
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  /**
+   * Whether this caller may record effort or travel here at all.
+   *
+   * <p>Separated from the entity's own open/archived refusal because the two answer different
+   * questions - "are you one of the people doing this" and "is this item still live" - and a caller
+   * denied for the first reason should not be told to reopen anything.
+   */
+  private static void assertMayRecord(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover, String what) {
+    if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover))
+      throw ApiException.forbidden("Only the people working this item can " + what + " it.");
+  }
+
+  private static void assertOwnEntry(boolean own, String kind) {
+    if (!own)
+      throw ApiException.forbidden("You can only change " + kind + " entries you recorded yourself.");
+  }
+
+  private static int minutes(Integer supplied, String what) {
+    if (supplied == null) throw ApiException.badRequest(what + " is required.");
+    return supplied;
+  }
+
+  /** Turns the entity's refusals into the API error contract, as {@code transition} already does. */
+  private static <T> T guard(java.util.function.Supplier<T> action) {
+    try {
+      return action.get();
+    } catch (IllegalArgumentException rejected) {
+      throw ApiException.badRequest(rejected.getMessage());
+    }
+  }
+
+  /** "2h 30m", for a history row a person reads. */
+  private static String duration(int totalMinutes) {
+    int hours = totalMinutes / 60;
+    int remainder = totalMinutes % 60;
+    if (hours == 0) return remainder + "m";
+    return remainder == 0 ? hours + "h" : hours + "h " + remainder + "m";
+  }
+
   // ---------------------------------------------------------------- notification
 
   /**
@@ -531,6 +798,9 @@ public class ProjectTaskService {
       throw ApiException.badRequest("title cannot be longer than 200 characters.");
     if (request.description().trim().length() > 4000)
       throw ApiException.badRequest("description cannot be longer than 4000 characters.");
+    if (request.summary() != null && request.summary().trim().length() > ProjectTaskEntity.MAX_SUMMARY)
+      throw ApiException.badRequest(
+          "summary cannot be longer than " + ProjectTaskEntity.MAX_SUMMARY + " characters.");
     if (request.linkedEntityType() != null && request.linkedEntityType() != LinkedEntityType.NONE
         && !notBlank(request.linkedEntityId()) && !notBlank(request.linkedEntityRef()))
       throw ApiException.badRequest("A linked record needs an id or a reference.");
@@ -607,14 +877,21 @@ public class ProjectTaskService {
     boolean entitled = ProjectTaskVisibilityPolicy.isEntitled(task, actor, permissions, cover);
     var childEntities = children(task.getId());
     var childSummaries = childEntities.stream().map(child -> summary(child, 0, now)).toList();
-    return new ProjectTaskDetail(task.getId(), task.getVersion(), task.getTitle(), task.getDescription(),
+    // Individual effort is held closer than the item itself: an all-teams task is readable across
+    // the organization, and "this person spent fourteen hours on it" should not be (TM-A05).
+    boolean mayViewEffort = ProjectTaskVisibilityPolicy.mayViewEffort(task, actor, permissions, cover);
+    return new ProjectTaskDetail(task.getId(), task.getVersion(), task.getTitle(), task.getSummary(),
+        task.getDescription(),
         task.getTaskType(), task.getPriority(), task.getStatus(), task.getVisibility(),
         task.getRelevantTeam(), task.getOwnerUserId(), task.getCreatedBy(), task.getParentTaskId(),
-        linked(task), task.getCreatedAt(), task.getDueAt(), task.getStartedAt(), task.getCompletedAt(),
+        linked(task), task.getCreatedAt(), task.getDueAt(),
+        task.getPlannedStartAt(), task.getPlannedEndAt(),
+        task.getStartedAt(), task.getCompletedAt(),
         task.getCancelledAt(), task.getArchivedAt(), task.overdue(now), task.getEscalationLevel(),
         List.copyOf(task.getStatus().allowedNext()),
         ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover),
         ProjectTaskVisibilityPolicy.mayClaim(task, actor, permissions, cover),
+        ProjectTaskVisibilityPolicy.mayEdit(task, actor, permissions, cover),
         task.requiredChecklistComplete(), childSummaries,
         task.getChecklist().stream().map(item -> new ChecklistItemResponse(item.getId(), item.getSequenceNo(),
             item.getTitle(), item.isRequired(), item.isCompleted(), item.getCompletedBy(),
@@ -628,7 +905,34 @@ public class ProjectTaskService {
         entitled ? task.getHistory().stream().map(event -> new HistoryResponse(event.getId(), event.getAction(),
             event.getFromStatus(), event.getToStatus(), event.getActor(), event.getOnBehalfOf(),
             event.getReason(), event.getOccurredAt(), event.getCorrelationId())).toList()
-            : List.of());
+            : List.of(),
+        mayViewEffort,
+        // Null rather than a zeroed total: absent says "not for you" without also saying "and there
+        // is nothing there", the same way masterData above withholds customer identity.
+        mayViewEffort ? new EffortResponse(task.totalWorkMinutes(), task.totalTravelMinutes(),
+            task.totalExpense(), task.expenseCurrency()) : null,
+        mayViewEffort ? task.getTimeEntries().stream()
+            .map(entry -> timeEntry(entry, actor)).toList() : List.of(),
+        mayViewEffort ? task.getTravelEntries().stream()
+            .map(entry -> travelEntry(entry, actor)).toList() : List.of());
+  }
+
+  /**
+   * {@code mayEdit} is resolved per entry for the calling user, like {@code mayAct} on the item
+   * itself: a screen that works out for itself whose entries are whose will eventually offer a
+   * control the service refuses.
+   */
+  private static TimeEntryResponse timeEntry(ProjectTaskTimeEntryEntity entry, String actor) {
+    return new TimeEntryResponse(entry.getId(), entry.getUsername(), entry.getWorkDate(),
+        entry.getDurationMinutes(), entry.getNote(), entry.getCreatedBy(), entry.getCreatedAt(),
+        entry.getUpdatedAt(), entry.belongsTo(actor));
+  }
+
+  private static TravelEntryResponse travelEntry(ProjectTaskTravelEntryEntity entry, String actor) {
+    return new TravelEntryResponse(entry.getId(), entry.getTraveller(), entry.getTravelDate(),
+        entry.getFromLocation(), entry.getToLocation(), entry.getPurpose(), entry.getTravelMinutes(),
+        entry.getExpenseAmount(), entry.getCurrencyCode(), entry.getVoucherRef(),
+        entry.getCreatedBy(), entry.getCreatedAt(), entry.getUpdatedAt(), entry.belongsTo(actor));
   }
 
   private static LinkedEntityResponse linked(ProjectTaskEntity task) {

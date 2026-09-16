@@ -113,6 +113,78 @@ public class ProjectTaskController {
     return service.comment(id, body, actor());
   }
 
+  /**
+   * Edits an open work item (TM-A03).
+   *
+   * <p>{@code PUT} rather than {@code PATCH} because the body is the item's whole editable state.
+   * With a partial patch, "clear the summary" and "leave the summary alone" are both an absent
+   * field; sending everything makes them different requests, and {@code expectedVersion} is what
+   * stops a full-state write built on a stale read from overwriting somebody else's edit.
+   *
+   * <p>Gated on view like the rest of this resource: whether this particular caller may edit this
+   * particular item depends on who owns it and whether it is still open, which is a record-level
+   * decision the service makes.
+   */
+  @PutMapping(path = "/{id}", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail update(@PathVariable String id, @RequestBody UpdateProjectTaskRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.update(id, body, actor(), correlationId(correlationId));
+  }
+
+  /* ------------------------------------------------------------------- time and travel */
+
+  /**
+   * Effort and journeys against the item (TM-A05, TM-A06).
+   *
+   * <p>Each returns the whole item rather than the entry alone, so a screen that logs an hour gets
+   * the recomputed totals, the new history row and the fresh version in the same response instead of
+   * making three calls to find out what its own write did.
+   */
+  @PostMapping(path = "/{id}/time", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.EXECUTE + "')")
+  public ProjectTaskDetail logTime(@PathVariable String id, @RequestBody TimeEntryRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.logTime(id, body, actor(), correlationId(correlationId));
+  }
+
+  @PutMapping(path = "/{id}/time/{entryId}", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.EXECUTE + "')")
+  public ProjectTaskDetail correctTime(@PathVariable String id, @PathVariable Long entryId,
+      @RequestBody TimeEntryRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.correctTime(id, entryId, body, actor(), correlationId(correlationId));
+  }
+
+  @DeleteMapping("/{id}/time/{entryId}")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.EXECUTE + "')")
+  public ProjectTaskDetail removeTime(@PathVariable String id, @PathVariable Long entryId,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.removeTime(id, entryId, actor(), correlationId(correlationId));
+  }
+
+  @PostMapping(path = "/{id}/travel", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.EXECUTE + "')")
+  public ProjectTaskDetail logTravel(@PathVariable String id, @RequestBody TravelEntryRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.logTravel(id, body, actor(), correlationId(correlationId));
+  }
+
+  @PutMapping(path = "/{id}/travel/{entryId}", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.EXECUTE + "')")
+  public ProjectTaskDetail correctTravel(@PathVariable String id, @PathVariable Long entryId,
+      @RequestBody TravelEntryRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.correctTravel(id, entryId, body, actor(), correlationId(correlationId));
+  }
+
+  @DeleteMapping("/{id}/travel/{entryId}")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.EXECUTE + "')")
+  public ProjectTaskDetail removeTravel(@PathVariable String id, @PathVariable Long entryId,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.removeTravel(id, entryId, actor(), correlationId(correlationId));
+  }
+
   /* ------------------------------------------------------------------------- assignees */
 
   /**

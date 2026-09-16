@@ -320,7 +320,7 @@ class ProjectTaskAssigneeServiceTest {
     var created = workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
         "Chase the PO", "Customer has not sent it.", ProjectTaskType.FOLLOW_UP, TaskPriority.MEDIUM,
         ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.CUSTOMER, "42",
-        "Northstar Medical", null, DUE, null, 7L, 42L, null), OWNER, "c");
+        "Northstar Medical", null, DUE, null, 7L, 42L, null, null, null, null), OWNER, "c");
 
     // The column existed on the entity and no create path had ever populated it, so TM-002's
     // customer link was modelled and never wired.
@@ -330,7 +330,7 @@ class ProjectTaskAssigneeServiceTest {
     assertThatThrownBy(() -> workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
         "Both", "Not allowed.", ProjectTaskType.FOLLOW_UP, TaskPriority.MEDIUM,
         ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.NONE, null, null,
-        null, DUE, null, 7L, 42L, 9L), OWNER, "c"))
+        null, DUE, null, 7L, 42L, 9L, null, null, null), OWNER, "c"))
         .isInstanceOf(Exception.class);
   }
 

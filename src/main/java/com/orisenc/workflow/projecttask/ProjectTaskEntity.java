@@ -2,10 +2,13 @@ package com.orisenc.workflow.projecttask;
 
 import com.orisenc.workflow.task.TaskPriority;
 import jakarta.persistence.*;
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * A unit of work (USR-TASK-001), as distinct from an approval decision.
@@ -36,6 +39,10 @@ public class ProjectTaskEntity {
   /** The actor on a history row nobody chose to write. */
   public static final String SLA_ACTOR = "sla-monitor";
 
+  public static final int MAX_TITLE = 200;
+  public static final int MAX_DESCRIPTION = 4000;
+  public static final int MAX_SUMMARY = 1000;
+
   @Id @Column(length = 40) private String id;
   @Version private long version;
   @Column(name = "organization_id") private Long organizationId;
@@ -56,6 +63,18 @@ public class ProjectTaskEntity {
   @Column(nullable = false, length = 200) private String title;
   @Column(nullable = false, length = 4000) private String description;
 
+  /**
+   * The task's own short account of the work (TM-A02), distinct from {@code description}.
+   *
+   * <p>{@code description} is the brief: what was asked for and what counts as done, written when
+   * the task is raised. This is what the work amounts to, and it stays editable throughout. The two
+   * are separate because the first stops being rewritten once work starts and the second does not.
+   *
+   * <p>Nullable, because every task that already exists has none and {@code ddl-auto} cannot add a
+   * non-null column to a populated table.
+   */
+  @Column(name = "summary", length = MAX_SUMMARY) private String summary;
+
   @Enumerated(EnumType.STRING) @Column(name = "task_type", nullable = false, length = 20)
   private ProjectTaskType taskType;
   @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20) private TaskPriority priority;
@@ -75,6 +94,26 @@ public class ProjectTaskEntity {
 
   @Column(name = "created_at", nullable = false) private Instant createdAt;
   @Column(name = "due_at", nullable = false) private Instant dueAt;
+
+  /**
+   * When the owner intends to start and finish (TM-A01).
+   *
+   * <p>Deliberately inert: {@code dueAt} remains the deadline the SLA ladder and every overdue query
+   * read, and planned end drives nothing. They answer different questions - "when did we commit to
+   * having this done" against "when do I mean to do it" - and collapsing them would make moving your
+   * own schedule silently move the deadline you are measured against.
+   */
+  @Column(name = "planned_start_at") private Instant plannedStartAt;
+  @Column(name = "planned_end_at") private Instant plannedEndAt;
+
+  /**
+   * When work actually began and finished.
+   *
+   * <p>Stamped by {@link #stampTimestamps} on the matching transition and correctable afterwards by
+   * whoever may edit the task, because people do the work and update the system later. No second
+   * pair of "actual" columns was added beside these: they already mean exactly this, and a duplicate
+   * pair would give every SLA and reporting query two candidate answers for when a task finished.
+   */
   @Column(name = "started_at") private Instant startedAt;
   @Column(name = "completed_at") private Instant completedAt;
   @Column(name = "cancelled_at") private Instant cancelledAt;
@@ -111,6 +150,19 @@ public class ProjectTaskEntity {
    */
   @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
   @OrderBy("username ASC") private List<ProjectTaskAssigneeEntity> assignees = new ArrayList<>();
+
+  /**
+   * Effort logged against this item, and journeys made for it (TM-A05, TM-A06).
+   *
+   * <p>Two collections rather than one, because their totals are reported separately and never added
+   * together: a two-hour job that cost five hours of travel is a fact worth seeing, and a single
+   * seven-hour figure hides it.
+   */
+  @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
+  @OrderBy("workDate ASC, id ASC") private List<ProjectTaskTimeEntryEntity> timeEntries = new ArrayList<>();
+
+  @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
+  @OrderBy("travelDate ASC, id ASC") private List<ProjectTaskTravelEntryEntity> travelEntries = new ArrayList<>();
 
   protected ProjectTaskEntity() {}
 
@@ -197,6 +249,254 @@ public class ProjectTaskEntity {
   }
 
   public void assignTo(String actor) { ownerUserId = actor; }
+
+  /**
+   * The three fields the constructor does not take, set once at creation.
+   *
+   * <p>Package-private and separate from {@link #applyEdit} because creation is not an edit: there
+   * is no previous value to diff against and no history row to write, and routing it through the
+   * edit path would put "summary set to ..." on a task one line after "CREATED".
+   */
+  void describe(String summary, Instant plannedStartAt, Instant plannedEndAt) {
+    this.summary = optionalText(summary, "A summary", MAX_SUMMARY);
+    assertOrdered(plannedStartAt, plannedEndAt, "The planned end cannot be before the planned start.");
+    this.plannedStartAt = plannedStartAt;
+    this.plannedEndAt = plannedEndAt;
+  }
+
+  // ---------------------------------------------------------------- editing (TM-A03)
+
+  /**
+   * One field an edit actually changed, ready to become a history row.
+   *
+   * <p>Values are rendered as text rather than kept typed: the row this becomes is read by a person
+   * looking at an activity feed, not by code branching on the field name.
+   */
+  public record FieldChange(String field, String from, String to) {}
+
+  /** The editable state of a work item, sent whole. See {@link #applyEdit}. */
+  public record Edit(String title, String summary, String description, ProjectTaskType taskType,
+      TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam,
+      LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
+      String parentTaskId, Instant dueAt, Instant plannedStartAt, Instant plannedEndAt,
+      Instant startedAt, Instant completedAt) {}
+
+  /**
+   * Whether this item is still open to change.
+   *
+   * <p>Closed means Completed or Cancelled, archived means withdrawn from use, and neither may be
+   * edited or have time logged against it: a closed record that keeps moving is not a record. A
+   * completed task can be reopened through the ordinary transition, which is the deliberate way back
+   * in - and that demands a comment, so the reason for reopening lands on the trail.
+   */
+  public boolean open() {
+    return !status.closed() && archivedAt == null;
+  }
+
+  /**
+   * Applies an edit and reports exactly what it changed.
+   *
+   * <p>Whole state rather than a sparse patch, so that clearing an optional field and leaving it
+   * alone are different requests instead of the same absent value. Optimistic locking is what makes
+   * that safe, and the service refuses an edit that does not carry the expected version.
+   *
+   * <p>The diff is computed here rather than in the service because the two must not disagree: a
+   * history row claiming a change the entity did not make, or an entity change no row describes, is
+   * precisely the audit hole TM-018 exists to close. The caller writes one row per returned change
+   * and nothing else.
+   *
+   * @return the fields that actually changed, empty when the edit was a no-op
+   * @throws IllegalArgumentException when a required field is missing or the dates contradict
+   */
+  public List<FieldChange> applyEdit(Edit edit) {
+    if (edit == null) throw new IllegalArgumentException("Nothing to change.");
+    String newTitle = requiredText(edit.title(), "A title", MAX_TITLE);
+    String newDescription = requiredText(edit.description(), "A description", MAX_DESCRIPTION);
+    String newSummary = optionalText(edit.summary(), "A summary", MAX_SUMMARY);
+    String newTeam = requiredText(edit.relevantTeam(), "A relevant team", 60);
+    if (edit.taskType() == null) throw new IllegalArgumentException("A task type is required.");
+    if (edit.priority() == null) throw new IllegalArgumentException("A priority is required.");
+    if (edit.visibility() == null) throw new IllegalArgumentException("A visibility is required.");
+    if (edit.dueAt() == null) throw new IllegalArgumentException("A due date is required.");
+    assertOrdered(edit.plannedStartAt(), edit.plannedEndAt(),
+        "The planned end cannot be before the planned start.");
+    assertOrdered(edit.startedAt(), edit.completedAt(),
+        "A work item cannot have finished before it started.");
+    LinkedEntityType newLinkType =
+        edit.linkedEntityType() == null ? LinkedEntityType.NONE : edit.linkedEntityType();
+    String newLinkId = optionalText(edit.linkedEntityId(), "A linked record id", 64);
+    String newLinkRef = optionalText(edit.linkedEntityRef(), "A linked record reference", 120);
+    if (newLinkType != LinkedEntityType.NONE && newLinkId == null && newLinkRef == null)
+      throw new IllegalArgumentException("A linked record needs an id or a reference.");
+    String newParent = optionalText(edit.parentTaskId(), "A parent work item", 40);
+    if (id.equals(newParent)) throw new IllegalArgumentException("A work item cannot be its own parent.");
+
+    var changes = new ArrayList<FieldChange>();
+    title = record(changes, "title", title, newTitle);
+    summary = record(changes, "summary", summary, newSummary);
+    description = record(changes, "description", description, newDescription);
+    taskType = record(changes, "type", taskType, edit.taskType());
+    priority = record(changes, "priority", priority, edit.priority());
+    visibility = record(changes, "visibility", visibility, edit.visibility());
+    relevantTeam = record(changes, "relevant team", relevantTeam, newTeam);
+    linkedEntityType = record(changes, "linked record type", linkedEntityType, newLinkType);
+    linkedEntityId = record(changes, "linked record id", linkedEntityId, newLinkId);
+    linkedEntityRef = record(changes, "linked record", linkedEntityRef, newLinkRef);
+    parentTaskId = record(changes, "parent work item", parentTaskId, newParent);
+    dueAt = record(changes, "due date", dueAt, edit.dueAt());
+    plannedStartAt = record(changes, "planned start", plannedStartAt, edit.plannedStartAt());
+    plannedEndAt = record(changes, "planned end", plannedEndAt, edit.plannedEndAt());
+    startedAt = record(changes, "actual start", startedAt, edit.startedAt());
+    completedAt = record(changes, "actual end", completedAt, edit.completedAt());
+    return List.copyOf(changes);
+  }
+
+  /**
+   * Notes a change if there is one, and returns the value to keep.
+   *
+   * <p>Returning the replacement rather than assigning it keeps each line above readable as one
+   * statement - "this field becomes that, and the change is recorded" - instead of an if and an
+   * assignment that can drift apart.
+   */
+  private static <T> T record(List<FieldChange> changes, String field, T current, T replacement) {
+    if (Objects.equals(current, replacement)) return current;
+    changes.add(new FieldChange(field, text(current), text(replacement)));
+    return replacement;
+  }
+
+  private static String text(Object value) {
+    if (value == null) return null;
+    String rendered = value.toString();
+    // A four-thousand character description would otherwise put four thousand characters onto a
+    // history row, twice. The row says the field changed; the task itself says what it now holds.
+    return rendered.length() > 200 ? rendered.substring(0, 197) + "..." : rendered;
+  }
+
+  private static void assertOrdered(Instant start, Instant end, String message) {
+    if (start != null && end != null && end.isBefore(start)) throw new IllegalArgumentException(message);
+  }
+
+  private static String requiredText(String value, String what, int max) {
+    if (value == null || value.isBlank()) throw new IllegalArgumentException(what + " is required.");
+    String trimmed = value.trim();
+    if (trimmed.length() > max)
+      throw new IllegalArgumentException(what + " cannot be longer than " + max + " characters.");
+    return trimmed;
+  }
+
+  private static String optionalText(String value, String what, int max) {
+    if (value == null || value.isBlank()) return null;
+    String trimmed = value.trim();
+    if (trimmed.length() > max)
+      throw new IllegalArgumentException(what + " cannot be longer than " + max + " characters.");
+    return trimmed;
+  }
+
+  // ------------------------------------------------- time and travel (TM-A05, TM-A06)
+
+  /**
+   * Records that somebody spent time on this item.
+   *
+   * <p>Refuses a closed or archived item for the same reason editing does: hours arriving against a
+   * task that finished last month change a total somebody has already reported on.
+   *
+   * @throws IllegalArgumentException when the item is closed or archived, or the entry is invalid
+   */
+  public ProjectTaskTimeEntryEntity logTime(String username, LocalDate workDate, int minutes,
+      String note, String loggedBy, Instant now) {
+    assertOpen("log time against");
+    var entry = new ProjectTaskTimeEntryEntity(this, username, workDate, minutes, note, loggedBy, now);
+    timeEntries.add(entry);
+    return entry;
+  }
+
+  public ProjectTaskTravelEntryEntity logTravel(String traveller, LocalDate travelDate, String from,
+      String to, String purpose, int travelMinutes, BigDecimal expense, String currency,
+      String voucherRef, String loggedBy, Instant now) {
+    assertOpen("log travel against");
+    var entry = new ProjectTaskTravelEntryEntity(this, traveller, travelDate, from, to, purpose,
+        travelMinutes, expense, currency, voucherRef, loggedBy, now);
+    travelEntries.add(entry);
+    return entry;
+  }
+
+  public ProjectTaskTimeEntryEntity timeEntry(Long entryId) {
+    return timeEntries.stream().filter(entry -> entry.getId().equals(entryId)).findFirst()
+        .orElseThrow(() -> new IllegalArgumentException("That time entry is not on this work item."));
+  }
+
+  public ProjectTaskTravelEntryEntity travelEntry(Long entryId) {
+    return travelEntries.stream().filter(entry -> entry.getId().equals(entryId)).findFirst()
+        .orElseThrow(() -> new IllegalArgumentException("That travel entry is not on this work item."));
+  }
+
+  /** Corrects an entry, refusing a closed item exactly as logging one does. */
+  public void correctTime(ProjectTaskTimeEntryEntity entry, LocalDate workDate, int minutes,
+      String note, Instant now) {
+    assertOpen("change time logged against");
+    entry.correct(workDate, minutes, note, now);
+  }
+
+  public void correctTravel(ProjectTaskTravelEntryEntity entry, LocalDate travelDate, String from,
+      String to, String purpose, int travelMinutes, BigDecimal expense, String currency,
+      String voucherRef, Instant now) {
+    assertOpen("change travel logged against");
+    entry.correct(travelDate, from, to, purpose, travelMinutes, expense, currency, voucherRef, now);
+  }
+
+  public void removeTimeEntry(ProjectTaskTimeEntryEntity entry) {
+    assertOpen("change time logged against");
+    timeEntries.remove(entry);
+  }
+
+  public void removeTravelEntry(ProjectTaskTravelEntryEntity entry) {
+    assertOpen("change travel logged against");
+    travelEntries.remove(entry);
+  }
+
+  private void assertOpen(String what) {
+    if (archivedAt != null)
+      throw new IllegalArgumentException("This work item is archived; you cannot " + what + " it.");
+    if (status.closed())
+      throw new IllegalArgumentException("This work item is " + readable(status)
+          + "; reopen it before you " + what + " it.");
+  }
+
+  /** Effort logged on this item, in minutes. Never includes travel - see {@link #totalTravelMinutes}. */
+  public int totalWorkMinutes() {
+    return timeEntries.stream().mapToInt(ProjectTaskTimeEntryEntity::getDurationMinutes).sum();
+  }
+
+  public int totalTravelMinutes() {
+    return travelEntries.stream().mapToInt(ProjectTaskTravelEntryEntity::getTravelMinutes).sum();
+  }
+
+  /**
+   * What travel for this item has cost.
+   *
+   * <p>Totals only the entries in {@link #expenseCurrency()} rather than adding different currencies
+   * into a meaningless number. Mixed-currency travel on one task is unlikely, and a silently wrong
+   * total would be worse than a visibly partial one.
+   */
+  public BigDecimal totalExpense() {
+    String currency = expenseCurrency();
+    return travelEntries.stream()
+        .filter(entry -> entry.getCurrencyCode().equals(currency))
+        .map(ProjectTaskTravelEntryEntity::getExpenseAmount)
+        .reduce(BigDecimal.ZERO, BigDecimal::add);
+  }
+
+  /** The currency the expense total is in, or the default when no travel has been logged. */
+  public String expenseCurrency() {
+    return travelEntries.stream().findFirst()
+        .map(ProjectTaskTravelEntryEntity::getCurrencyCode)
+        .orElse(ProjectTaskTravelEntryEntity.DEFAULT_CURRENCY);
+  }
+
+  public List<ProjectTaskTimeEntryEntity> getTimeEntries() { return List.copyOf(timeEntries); }
+
+  public List<ProjectTaskTravelEntryEntity> getTravelEntries() { return List.copyOf(travelEntries); }
+
 
   /**
    * Records that this item has reached an SLA rung, and writes the history row that says so.
@@ -303,6 +603,7 @@ public class ProjectTaskEntity {
   public String getParentTaskId() { return parentTaskId; }
   public String getTitle() { return title; }
   public String getDescription() { return description; }
+  public String getSummary() { return summary; }
   public ProjectTaskType getTaskType() { return taskType; }
   public TaskPriority getPriority() { return priority; }
   public ProjectTaskStatus getStatus() { return status; }
@@ -315,6 +616,8 @@ public class ProjectTaskEntity {
   public String getLinkedEntityRef() { return linkedEntityRef; }
   public Instant getCreatedAt() { return createdAt; }
   public Instant getDueAt() { return dueAt; }
+  public Instant getPlannedStartAt() { return plannedStartAt; }
+  public Instant getPlannedEndAt() { return plannedEndAt; }
   public Instant getStartedAt() { return startedAt; }
   public Instant getCompletedAt() { return completedAt; }
   public Instant getCancelledAt() { return cancelledAt; }
