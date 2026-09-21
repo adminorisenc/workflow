@@ -603,12 +603,12 @@ public class ProjectTaskService {
     assertOwnEntry(entry.belongsTo(actor), "time");
 
     Instant now = clock.instant();
-    String removed = entry.getUsername() + "'s " + duration(entry.getDurationMinutes()) + " on "
-        + entry.getWorkDate();
+    String removed = actor + " removed " + whose(entry.getUsername(), actor)
+        + duration(entry.getDurationMinutes()) + " logged on " + entry.getWorkDate();
     guard(() -> { task.removeTimeEntry(entry); return entry; });
     // The entry goes, the fact that it existed does not: a deletion nobody can see is a hole in the
     // total that the audit trail cannot explain.
-    task.addHistory("TIME_REMOVED", actor, "Removed " + removed, now, correlationId);
+    task.addHistory("TIME_REMOVED", actor, removed, now, correlationId);
     entityManager.flush();
     return detail(task, actor, permissions, cover);
   }
@@ -679,10 +679,11 @@ public class ProjectTaskService {
     assertOwnEntry(entry.belongsTo(actor), "travel");
 
     Instant now = clock.instant();
-    String removed = entry.getTraveller() + "'s journey on " + entry.getTravelDate() + ", "
-        + entry.getCurrencyCode() + " " + entry.getExpenseAmount().toPlainString();
+    String removed = actor + " removed " + whose(entry.getTraveller(), actor) + "journey on "
+        + entry.getTravelDate() + ", " + entry.getCurrencyCode() + " "
+        + entry.getExpenseAmount().toPlainString();
     guard(() -> { task.removeTravelEntry(entry); return entry; });
-    task.addHistory("TRAVEL_REMOVED", actor, "Removed " + removed, now, correlationId);
+    task.addHistory("TRAVEL_REMOVED", actor, removed, now, correlationId);
     entityManager.flush();
     return detail(task, actor, permissions, cover);
   }
@@ -736,6 +737,18 @@ public class ProjectTaskService {
     String combined = sentence + ": " + detail.trim();
     if (combined.length() <= ProjectTaskHistoryEntity.MAX_REASON) return combined;
     return combined.substring(0, ProjectTaskHistoryEntity.MAX_REASON - 3) + "...";
+  }
+
+  /**
+   * "ravi@orisenc.com's " when the entry is somebody else's, and nothing when it is the actor's own.
+   *
+   * <p>Every sentence built with this opens with the actor's name, which is what lets the activity
+   * feed drop its own actor prefix instead of rendering the same person twice. Naming the worker as
+   * well, but only when the two differ, keeps the row accurate for the one case where they do - a
+   * manager clearing an entry they recorded for somebody else.
+   */
+  private static String whose(String subject, String actor) {
+    return subject.equalsIgnoreCase(actor) ? "" : subject + "'s ";
   }
 
   /** "2h 30m", for a history row a person reads. */

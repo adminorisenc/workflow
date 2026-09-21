@@ -315,9 +315,11 @@ class ProjectTaskEffortServiceTest {
     assertThat(after.timeEntries()).isEmpty();
     assertThat(after.effort().workMinutes()).isZero();
     // A deletion nobody can see is a hole in the total the audit trail cannot explain.
+    // Opens with the actor, like every other sentence on this feed, so the row can drop its own
+    // actor prefix instead of rendering the same person twice.
     assertThat(after.history()).anySatisfy(row -> {
       assertThat(row.action()).isEqualTo("TIME_REMOVED");
-      assertThat(row.reason()).contains("1h");
+      assertThat(row.reason()).startsWith(OWNER + " removed 1h logged on");
     });
   }
 
@@ -337,6 +339,100 @@ class ProjectTaskEffortServiceTest {
     assertThatThrownBy(() -> workItems.update("WRK-1", formFor(task), MATE, "c"))
         .isInstanceOf(ApiException.class)
         .satisfies(e -> assertThat(((ApiException) e).status()).isEqualTo(HttpStatus.FORBIDDEN));
+  }
+
+  /* ---------------------------------------------------------------- correcting travel */
+
+  @Test
+  void travelCanBeCorrectedAndRemovedByThePersonItBelongsTo() {
+    workItem();
+    signedInAs(OWNER, WORKER);
+    var logged = workItems.logTravel("WRK-1", new TravelEntryRequest(null, TODAY, "Depot", "Site",
+        "Delivery", 300, new BigDecimal("450.50"), "INR", "BILL-22"), OWNER, "c");
+    Long entryId = logged.travelEntries().getFirst().id();
+
+    var corrected = workItems.correctTravel("WRK-1", entryId, new TravelEntryRequest(null, TODAY,
+        "Depot", "Site", "Delivery and collection", 360, new BigDecimal("500.00"), "INR", "BILL-23"),
+        OWNER, "c");
+
+    assertThat(corrected.effort().travelMinutes()).isEqualTo(360);
+    assertThat(corrected.effort().expenseTotal()).isEqualByComparingTo("500.00");
+    assertThat(corrected.travelEntries()).singleElement().satisfies(entry -> {
+      assertThat(entry.voucherRef()).isEqualTo("BILL-23");
+      assertThat(entry.updatedAt()).isNotNull();
+    });
+    assertThat(corrected.history()).anySatisfy(row ->
+        assertThat(row.action()).isEqualTo("TRAVEL_CORRECTED"));
+
+    var after = workItems.removeTravel("WRK-1", entryId, OWNER, "c");
+    assertThat(after.travelEntries()).isEmpty();
+    assertThat(after.effort().travelMinutes()).isZero();
+    assertThat(after.effort().expenseTotal()).isEqualByComparingTo("0.00");
+    assertThat(after.history()).anySatisfy(row ->
+        assertThat(row.action()).isEqualTo("TRAVEL_REMOVED"));
+  }
+
+  @Test
+  void travelLoggedBySomebodyElseIsNotYoursToCorrect() {
+    workItem();
+    signedInAs(OWNER, WORKER);
+    var logged = workItems.logTravel("WRK-1", new TravelEntryRequest(null, TODAY, "A", "B", "Visit",
+        60, new BigDecimal("100.00"), "INR", null), OWNER, "c");
+    Long entryId = logged.travelEntries().getFirst().id();
+
+    signedInAs(LEAD, MANAGER);
+    assertThatThrownBy(() -> workItems.removeTravel("WRK-1", entryId, LEAD, "c"))
+        .isInstanceOf(ApiException.class)
+        .satisfies(e -> assertThat(((ApiException) e).status()).isEqualTo(HttpStatus.FORBIDDEN));
+  }
+
+  /* ------------------------------------------------------------------- editing the hierarchy */
+
+  @Test
+  void anEditCannotHangAWorkItemBeneathItsOwnChild() {
+    var parent = workItem();
+    signedInAs(OWNER, WORKER);
+    var child = workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest("Stage one",
+        "A stage of the parent.", ProjectTaskType.DELIVERABLE, TaskPriority.MEDIUM,
+        ProjectTaskVisibility.RELEVANT_TEAM, "Operations", OWNER, LinkedEntityType.NONE, null, null,
+        "WRK-1", DUE, null, null, null, null, null, null, null), OWNER, "c");
+
+    // The cycle check needs the other rows in the table, so it is the service's to make - the
+    // entity can only refuse a task that names itself.
+    var form = formFor(parent);
+    assertThatThrownBy(() -> workItems.update("WRK-1", new UpdateProjectTaskRequest(form.title(),
+        form.summary(), form.description(), form.taskType(), form.priority(), form.visibility(),
+        form.relevantTeam(), form.linkedEntityType(), form.linkedEntityId(), form.linkedEntityRef(),
+        child.id(), form.dueAt(), null, null, null, null, form.expectedVersion()), OWNER, "c"))
+        .isInstanceOf(ApiException.class)
+        .satisfies(e -> {
+          assertThat(((ApiException) e).status()).isEqualTo(HttpStatus.BAD_REQUEST);
+          assertThat(e).hasMessageContaining("loop");
+        });
+  }
+
+  @Test
+  void whoeverRaisedAnItemMayStillEditItAfterItIsReassignedAway() {
+    var task = workItem();
+    signedInAs(LEAD, MANAGER);
+    var current = workItems.get("WRK-1", LEAD, ProjectTaskPermissions.granted());
+    workItems.reassign("WRK-1", new ProjectTaskDtos.ReassignRequest(MATE, "Ravi is on site today.",
+        current.version()), LEAD, "c");
+
+    // OWNER raised it and no longer owns it. Authorship is a standing connection to the work, which
+    // is why mayView and mayEdit both honour it - see ProjectTaskVisibilityPolicy#isOwnerOrCreator.
+    signedInAs(OWNER, WORKER);
+    var asCreator = workItems.get("WRK-1", OWNER, ProjectTaskPermissions.granted());
+    assertThat(asCreator.ownerUserId()).isEqualTo(MATE);
+    assertThat(asCreator.mayEdit()).isTrue();
+
+    var updated = workItems.update("WRK-1", new UpdateProjectTaskRequest(asCreator.title(),
+        "Handed to Ravi.", asCreator.description(), asCreator.taskType(), asCreator.priority(),
+        asCreator.visibility(), asCreator.relevantTeam(), LinkedEntityType.SALES_ORDER, null,
+        "SO-90812", null, asCreator.dueAt(), null, null, null, null, asCreator.version()),
+        OWNER, "c");
+    assertThat(updated.summary()).isEqualTo("Handed to Ravi.");
+    assertThat(task.getId()).isEqualTo("WRK-1");
   }
 
   /* ----------------------------------------------------------------------- the activity feed */
