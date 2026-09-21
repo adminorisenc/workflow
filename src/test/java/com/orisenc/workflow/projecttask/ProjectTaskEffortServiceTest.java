@@ -339,6 +339,74 @@ class ProjectTaskEffortServiceTest {
         .satisfies(e -> assertThat(((ApiException) e).status()).isEqualTo(HttpStatus.FORBIDDEN));
   }
 
+  /* ----------------------------------------------------------------------- the activity feed */
+
+  @Test
+  void theFeedCarriesWhatSomebodyDidAndNotOnlyHowLongItTook() {
+    workItem();
+    signedInAs(OWNER, WORKER);
+
+    var updated = workItems.logTime("WRK-1",
+        new TimeEntryRequest(null, TODAY, 150, "Loaded the van and captured the POD."), OWNER, "c");
+
+    // The feed is where "who worked and for how long" is read. A row that stopped at the duration
+    // would send the reader to another tab for the half that says what was actually done.
+    assertThat(updated.history()).anySatisfy(row -> {
+      assertThat(row.action()).isEqualTo("TIME_LOGGED");
+      assertThat(row.reason())
+          .contains("2h 30m")
+          .contains("Loaded the van and captured the POD.");
+    });
+  }
+
+  @Test
+  void travelCarriesItsPurposeIntoTheFeed() {
+    workItem();
+    signedInAs(OWNER, WORKER);
+
+    var updated = workItems.logTravel("WRK-1", new TravelEntryRequest(null, TODAY, "Depot",
+        "Northstar Medical", "Deliver and collect the signed POD", 300, new BigDecimal("450.50"),
+        "INR", null), OWNER, "c");
+
+    assertThat(updated.history()).anySatisfy(row -> {
+      assertThat(row.action()).isEqualTo("TRAVEL_LOGGED");
+      assertThat(row.reason()).contains("Deliver and collect the signed POD");
+    });
+  }
+
+  @Test
+  void aNoteAsLongAsTheColumnAllowsDoesNotFailTheWrite() {
+    workItem();
+    signedInAs(OWNER, WORKER);
+
+    // Both a note and a reason may be 2000 characters, so appending one to the other overflows the
+    // column on input that is entirely valid. The row is cut; the note itself is kept whole on the
+    // entry, which is what the Timesheet tab reads.
+    String essay = "x".repeat(ProjectTaskTimeEntryEntity.MAX_NOTE);
+    var updated = workItems.logTime("WRK-1", new TimeEntryRequest(null, TODAY, 60, essay), OWNER, "c");
+
+    assertThat(updated.history()).anySatisfy(row -> {
+      assertThat(row.action()).isEqualTo("TIME_LOGGED");
+      assertThat(row.reason()).hasSize(ProjectTaskHistoryEntity.MAX_REASON).endsWith("...");
+    });
+    assertThat(updated.timeEntries()).singleElement()
+        .satisfies(entry -> assertThat(entry.note()).hasSize(ProjectTaskTimeEntryEntity.MAX_NOTE));
+  }
+
+  @Test
+  void anEntryWithNoNoteReadsAsItDidBefore() {
+    workItem();
+    signedInAs(OWNER, WORKER);
+
+    var updated = workItems.logTime("WRK-1", new TimeEntryRequest(null, TODAY, 60, "  "), OWNER, "c");
+
+    // A blank note adds no trailing colon to the sentence.
+    assertThat(updated.history()).anySatisfy(row -> {
+      assertThat(row.action()).isEqualTo("TIME_LOGGED");
+      assertThat(row.reason()).endsWith(TODAY.toString());
+    });
+  }
+
   /* ------------------------------------------------------------- the part that matters most */
 
   @Test

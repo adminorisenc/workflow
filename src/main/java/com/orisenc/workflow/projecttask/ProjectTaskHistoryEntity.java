@@ -20,6 +20,15 @@ import java.time.Instant;
 })
 public class ProjectTaskHistoryEntity {
 
+  /**
+   * How much a row may say.
+   *
+   * <p>Named rather than left as a bare number in the column annotation because callers now build
+   * reasons out of user-supplied text - a timesheet note is itself allowed 2000 characters - and a
+   * caller that cannot see the limit will eventually write past it and fail a valid request.
+   */
+  public static final int MAX_REASON = 2000;
+
   @Id @GeneratedValue(strategy = GenerationType.IDENTITY) private Long id;
 
   @ManyToOne(fetch = FetchType.LAZY, optional = false)
@@ -40,7 +49,7 @@ public class ProjectTaskHistoryEntity {
    * about who did it.
    */
   @Column(name = "on_behalf_of", length = 120) private String onBehalfOf;
-  @Column(length = 2000) private String reason;
+  @Column(length = MAX_REASON) private String reason;
   @Column(name = "occurred_at", nullable = false) private Instant occurredAt;
   @Column(name = "correlation_id", nullable = false, length = 100) private String correlationId;
 

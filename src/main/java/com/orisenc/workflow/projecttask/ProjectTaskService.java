@@ -556,8 +556,8 @@ public class ProjectTaskService {
         minutes(request.durationMinutes(), "Time spent"), request.note(), actor, now));
     entityManager.flush();
     task.addHistory("TIME_LOGGED", actor,
-        entry.getUsername() + " logged " + duration(entry.getDurationMinutes()) + " on "
-            + entry.getWorkDate(), now, correlationId);
+        withDetail(entry.getUsername() + " logged " + duration(entry.getDurationMinutes()) + " on "
+            + entry.getWorkDate(), entry.getNote()), now, correlationId);
     entityManager.flush();
     return detail(task, actor, permissions, cover);
   }
@@ -587,8 +587,9 @@ public class ProjectTaskService {
       return entry;
     });
     task.addHistory("TIME_CORRECTED", actor,
-        entry.getUsername() + " corrected " + duration(previous) + " to "
-            + duration(entry.getDurationMinutes()) + " on " + entry.getWorkDate(), now, correlationId);
+        withDetail(entry.getUsername() + " corrected " + duration(previous) + " to "
+            + duration(entry.getDurationMinutes()) + " on " + entry.getWorkDate(), entry.getNote()),
+        now, correlationId);
     entityManager.flush();
     return detail(task, actor, permissions, cover);
   }
@@ -634,10 +635,10 @@ public class ProjectTaskService {
         request.currencyCode(), request.voucherRef(), actor, now));
     entityManager.flush();
     task.addHistory("TRAVEL_LOGGED", actor,
-        entry.getTraveller() + " travelled " + entry.getFromLocation() + " to "
+        withDetail(entry.getTraveller() + " travelled " + entry.getFromLocation() + " to "
             + entry.getToLocation() + " on " + entry.getTravelDate() + ", "
             + duration(entry.getTravelMinutes()) + ", " + entry.getCurrencyCode() + " "
-            + entry.getExpenseAmount().toPlainString(), now, correlationId);
+            + entry.getExpenseAmount().toPlainString(), entry.getPurpose()), now, correlationId);
     entityManager.flush();
     return detail(task, actor, permissions, cover);
   }
@@ -716,6 +717,25 @@ public class ProjectTaskService {
     } catch (IllegalArgumentException rejected) {
       throw ApiException.badRequest(rejected.getMessage());
     }
+  }
+
+  /**
+   * Appends the person's own words to the sentence a history row carries.
+   *
+   * <p>Why at all: the activity feed is where "who worked and for how long" is read, and a row that
+   * stops at the duration sends the reader to another tab for the half that says what was actually
+   * done. The note belongs beside the hours, not one click away from them.
+   *
+   * <p>Why it truncates: a timesheet note may be {@value ProjectTaskTimeEntryEntity#MAX_NOTE}
+   * characters and so may a reason, so concatenating the two can exceed the column on input that is
+   * entirely valid. Cutting the sentence is right where failing the write would not be - the note
+   * itself is stored in full on the entry, and this row is a pointer to it rather than a second copy.
+   */
+  private static String withDetail(String sentence, String detail) {
+    if (detail == null || detail.isBlank()) return sentence;
+    String combined = sentence + ": " + detail.trim();
+    if (combined.length() <= ProjectTaskHistoryEntity.MAX_REASON) return combined;
+    return combined.substring(0, ProjectTaskHistoryEntity.MAX_REASON - 3) + "...";
   }
 
   /** "2h 30m", for a history row a person reads. */
