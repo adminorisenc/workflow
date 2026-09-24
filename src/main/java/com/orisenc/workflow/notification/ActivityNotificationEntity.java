@@ -19,7 +19,13 @@ public class ActivityNotificationEntity {
   @Column(name = "user_id", nullable = false, length = 200)
   private String userId;
 
-  @Column(name = "organization_id", nullable = false)
+  /**
+   * The client organization of the Sales record the activity belongs to, when it has one. Optional:
+   * Orisenc is the one company using the platform, organizations are its clients, and a lead is often
+   * nobody's client yet. The live column needs {@code DROP NOT NULL} - see
+   * {@code scripts/migrate-organization-optional-workflow.sql} at the workspace root.
+   */
+  @Column(name = "organization_id")
   private Long organizationId;
 
   @Column(name = "activity_id", nullable = false)
