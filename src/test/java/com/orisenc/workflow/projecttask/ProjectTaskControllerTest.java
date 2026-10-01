@@ -103,9 +103,9 @@ class ProjectTaskControllerTest {
         ProjectTaskType.DELIVERABLE, TaskPriority.HIGH, ProjectTaskStatus.IN_PROGRESS,
         ProjectTaskVisibility.RELEVANT_TEAM, "Operations", OWNER, OWNER, null,
         new ProjectTaskDtos.LinkedEntityResponse(LinkedEntityType.NONE, null, null),
-        DUE, DUE, null, null, null, null, null, null, false, 0, List.of(), true, true, true, true,
+        DUE, DUE, null, null, null, null, null, null, false, 0, List.of(), true, true, true, true, true,
         List.of(), List.of(), List.of(), List.of(), false, null, List.of(), true,
-        new ProjectTaskDtos.EffortResponse(150, 0, BigDecimal.ZERO, "INR"), List.of(), List.of());
+        new ProjectTaskDtos.EffortResponse(150, 0, BigDecimal.ZERO, "INR"), List.of(), List.of(), false, 0, 0, 0, true, List.of(), null);
   }
 
   private static String updateBody() {
@@ -289,5 +289,29 @@ class ProjectTaskControllerTest {
         .logTime(eq("WRK-1"), any(), eq(OWNER), correlation.capture());
     // Never null and never empty: the audit row and the notification both key off it.
     org.assertj.core.api.Assertions.assertThat(correlation.getAllValues().getLast()).isNotBlank();
+  }
+
+  @Test void addsSubtasksAndBindsBatchWithVersion() throws Exception {
+    when(service.addSubtasks(eq("WRK-1"), any(), eq(OWNER), any())).thenReturn(detail());
+    mvc.perform(post("/api/project-tasks/WRK-1/subtasks").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"subtasks\":[{\"title\":\"Child\",\"priority\":\"MEDIUM\"}],\"expectedVersion\":3}"))
+        .andExpect(status().isCreated()).andExpect(jsonPath("$.mayAddSubtasks").value(true));
+    var body = ArgumentCaptor.forClass(ProjectTaskDtos.AddSubtasksRequest.class);
+    verify(service).addSubtasks(eq("WRK-1"), body.capture(), eq(OWNER), any());
+    org.assertj.core.api.Assertions.assertThat(body.getValue().subtasks().getFirst().title()).isEqualTo("Child");
+    org.assertj.core.api.Assertions.assertThat(body.getValue().expectedVersion()).isEqualTo(3L);
+  }
+  @Test void completionErrorNamesOpenSubtasksInResponseBody() throws Exception {
+    when(service.transition(eq("WRK-1"), any(), eq(OWNER), any()))
+        .thenThrow(ApiException.badRequest("2 subtasks are still open: WRK-A, WRK-B"));
+    mvc.perform(post("/api/project-tasks/WRK-1/transition").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"status\":\"COMPLETED\",\"comment\":\"Done\",\"expectedVersion\":3}"))
+        .andExpect(status().isBadRequest()).andExpect(jsonPath("$.message").value("2 subtasks are still open: WRK-A, WRK-B"));
+  }
+  @Test void addingSubtasksRequiresViewPermission() throws Exception {
+    authorities(ProjectTaskPermissions.EXECUTE);
+    mvc.perform(post("/api/project-tasks/WRK-1/subtasks").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"subtasks\":[{\"title\":\"Child\"}],\"expectedVersion\":3}"))
+        .andExpect(status().isForbidden());
   }
 }

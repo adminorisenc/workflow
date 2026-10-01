@@ -2,6 +2,8 @@ package com.orisenc.workflow.projecttask;
 
 import jakarta.persistence.*;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Append-only discussion on a work item (task_comments).
@@ -32,6 +34,8 @@ public class ProjectTaskCommentEntity {
   @Column(name = "author_user_id", nullable = false, length = 120) private String author;
   @Column(nullable = false, length = MAX_BODY) private String body;
   @Column(name = "created_at", nullable = false) private Instant createdAt;
+  @OneToMany(mappedBy = "comment", cascade = CascadeType.ALL, orphanRemoval = true)
+  private List<ProjectTaskCommentMentionEntity> mentions = new ArrayList<>();
 
   protected ProjectTaskCommentEntity() {}
 
@@ -46,4 +50,6 @@ public class ProjectTaskCommentEntity {
   public String getAuthor() { return author; }
   public String getBody() { return body; }
   public Instant getCreatedAt() { return createdAt; }
+  public List<ProjectTaskCommentMentionEntity> getMentions() { return List.copyOf(mentions); }
+  void addMention(String username) { mentions.add(new ProjectTaskCommentMentionEntity(this, username)); }
 }

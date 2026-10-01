@@ -28,7 +28,37 @@ public final class ProjectTaskDtos {
       /* TM-002's customer link. Optional, and a task carries a customer or a vendor, never both. */
       Long organizationId, Long customerId, Long vendorId,
       /* TM-A02 and TM-A01. All three optional at creation and editable afterwards. */
-      String summary, Instant plannedStartAt, Instant plannedEndAt) {}
+      String summary, Instant plannedStartAt, Instant plannedEndAt,
+      List<SubtaskInput> subtasks, boolean subtasksMandatory, Long subtasksFromTemplateId,
+      List<String> followers) {
+    public CreateProjectTaskRequest(String title, String description, ProjectTaskType taskType,
+        TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam, String ownerUserId,
+        LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
+        String parentTaskId, Instant dueAt, List<ChecklistItemInput> checklist,
+        Long organizationId, Long customerId, Long vendorId, String summary,
+        Instant plannedStartAt, Instant plannedEndAt) {
+      this(title, description, taskType, priority, visibility, relevantTeam, ownerUserId,
+          linkedEntityType, linkedEntityId, linkedEntityRef, parentTaskId, dueAt, checklist,
+          organizationId, customerId, vendorId, summary, plannedStartAt, plannedEndAt, null, false, null, null);
+    }
+    public CreateProjectTaskRequest(String title, String description, ProjectTaskType taskType,
+        TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam, String ownerUserId,
+        LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
+        String parentTaskId, Instant dueAt, List<ChecklistItemInput> checklist,
+        Long organizationId, Long customerId, Long vendorId, String summary,
+        Instant plannedStartAt, Instant plannedEndAt, List<SubtaskInput> subtasks,
+        boolean subtasksMandatory, Long subtasksFromTemplateId) {
+      this(title, description, taskType, priority, visibility, relevantTeam, ownerUserId, linkedEntityType,
+          linkedEntityId, linkedEntityRef, parentTaskId, dueAt, checklist, organizationId, customerId,
+          vendorId, summary, plannedStartAt, plannedEndAt, subtasks, subtasksMandatory,
+          subtasksFromTemplateId, null);
+    }
+  }
+
+  public record SubtaskInput(String title, TaskPriority priority, String ownerUserId,
+      Instant dueAt, Instant plannedStartAt) {}
+  public record AddSubtasksRequest(List<SubtaskInput> subtasks, Long subtasksFromTemplateId,
+      Long expectedVersion) {}
 
   /**
    * The whole editable state of a work item (TM-A03).
@@ -46,7 +76,17 @@ public final class ProjectTaskDtos {
       TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam,
       LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
       String parentTaskId, Instant dueAt, Instant plannedStartAt, Instant plannedEndAt,
-      Instant startedAt, Instant completedAt, Long expectedVersion) {}
+      Instant startedAt, Instant completedAt, Long expectedVersion, Boolean subtasksMandatory) {
+    public UpdateProjectTaskRequest(String title, String summary, String description, ProjectTaskType taskType,
+        TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam,
+        LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
+        String parentTaskId, Instant dueAt, Instant plannedStartAt, Instant plannedEndAt,
+        Instant startedAt, Instant completedAt, Long expectedVersion) {
+      this(title, summary, description, taskType, priority, visibility, relevantTeam, linkedEntityType,
+          linkedEntityId, linkedEntityRef, parentTaskId, dueAt, plannedStartAt, plannedEndAt,
+          startedAt, completedAt, expectedVersion, null);
+    }
+  }
 
   /**
    * Time somebody spent on the item (TM-A05).
@@ -90,18 +130,28 @@ public final class ProjectTaskDtos {
       String orderId, String orderReference, String customerName, String relevantTeam,
       TaskPriority priority, ProjectTaskVisibility visibility, String ownerUserId, Instant dueAt) {}
 
-  public record TransitionRequest(ProjectTaskStatus status, String comment, Long expectedVersion) {}
+  public record TransitionRequest(ProjectTaskStatus status, String comment, Long expectedVersion, List<String> mentions) {
+    public TransitionRequest(ProjectTaskStatus status, String comment, Long expectedVersion) { this(status, comment, expectedVersion, null); }
+  }
 
   public record ClaimRequest(String comment, Long expectedVersion) {}
 
   public record ReassignRequest(String ownerUserId, String comment, Long expectedVersion) {}
 
-  public record CommentRequest(String body) {}
+  public record CommentRequest(String body, List<String> mentions) {
+    public CommentRequest(String body) { this(body, null); }
+  }
 
   public record ChecklistToggleRequest(Boolean completed) {}
+  public record ChecklistItemsWriteRequest(List<ChecklistItemInput> items, Long templateId,
+      Long expectedVersion) {}
+  public record ChecklistItemUpdateRequest(String title, Boolean required, Long expectedVersion) {}
 
   /** Put someone on a work item. The username is the identity, as everywhere else on the item. */
   public record AssigneeRequest(String username) {}
+  public record FollowerRequest(String username) {}
+  public record TaskTemplateRequest(String name, String description, String titlePattern, List<String> checklist, List<String> subtasks) {}
+  public record TaskTemplateResponse(Long id, String name, boolean active, long version, String titlePattern, List<String> checklist, List<String> subtasks) {}
 
   public record AssigneeResponse(Long id, String username, String addedBy, Instant addedAt) {}
 
@@ -116,9 +166,12 @@ public final class ProjectTaskDtos {
       ProjectTaskStatus toStatus, String actor, String onBehalfOf, String reason, Instant occurredAt,
       String correlationId) {}
 
-  public record CommentResponse(Long id, String author, String body, Instant createdAt) {}
+  public record CommentResponse(Long id, String author, String body, Instant createdAt, List<String> mentions) {
+    public CommentResponse(Long id, String author, String body, Instant createdAt) { this(id, author, body, createdAt, List.of()); }
+  }
 
   public record ChecklistItemResponse(Long id, int sequenceNo, String title, boolean required,
+      ChecklistItemSource source,
       boolean completed, String completedBy, Instant completedAt) {}
 
   public record LinkedEntityResponse(LinkedEntityType type, String id, String reference) {}
@@ -145,7 +198,7 @@ public final class ProjectTaskDtos {
       ProjectTaskStatus status, ProjectTaskVisibility visibility, String relevantTeam,
       String ownerUserId, String parentTaskId, LinkedEntityResponse linkedEntity,
       Instant createdAt, Instant dueAt, Instant completedAt, boolean overdue, int escalationLevel,
-      int childCount, boolean archived) {}
+      int childCount, boolean archived, int openSubtaskCount, int completedSubtaskCount) {}
 
   /**
    * Full detail.
@@ -165,7 +218,7 @@ public final class ProjectTaskDtos {
       Instant completedAt, Instant cancelledAt, Instant archivedAt, boolean overdue,
       int escalationLevel, List<ProjectTaskStatus> allowedNextStatuses, boolean mayAct, boolean mayClaim,
       /** Whether this viewer may change the item's fields right now - false once it closes (TM-A03). */
-      boolean mayEdit,
+      boolean mayEdit, boolean mayEditChecklist,
       boolean requiredChecklistComplete, List<ProjectTaskSummary> children,
       List<ChecklistItemResponse> checklist, List<CommentResponse> comments,
       List<AssigneeResponse> assignees, boolean mayManageAssignees,
@@ -182,5 +235,30 @@ public final class ProjectTaskDtos {
       boolean mayViewEffort,
       /** Null, not zeroed, when {@code mayViewEffort} is false - absent says "not for you". */
       EffortResponse effort,
-      List<TimeEntryResponse> timeEntries, List<TravelEntryResponse> travelEntries) {}
+      List<TimeEntryResponse> timeEntries, List<TravelEntryResponse> travelEntries,
+      boolean subtasksMandatory, int childCount, int openSubtaskCount, int completedSubtaskCount,
+      boolean mayAddSubtasks, List<ProjectTaskSummary> siblings, String cancellationWarning,
+      List<String> followers, boolean isFollowing, boolean mayManageFollowers) {
+    public ProjectTaskDetail(String id, long version, String title, String summary, String description,
+        ProjectTaskType taskType, TaskPriority priority, ProjectTaskStatus status, ProjectTaskVisibility visibility,
+        String relevantTeam, String ownerUserId, String createdBy, String parentTaskId,
+        LinkedEntityResponse linkedEntity, Instant createdAt, Instant dueAt, Instant plannedStartAt,
+        Instant plannedEndAt, Instant startedAt, Instant completedAt, Instant cancelledAt, Instant archivedAt,
+        boolean overdue, int escalationLevel, List<ProjectTaskStatus> allowedNextStatuses, boolean mayAct,
+        boolean mayClaim, boolean mayEdit, boolean mayEditChecklist, boolean requiredChecklistComplete,
+        List<ProjectTaskSummary> children, List<ChecklistItemResponse> checklist, List<CommentResponse> comments,
+        List<AssigneeResponse> assignees, boolean mayManageAssignees, MasterDataResponse masterData,
+        List<HistoryResponse> history, boolean mayViewEffort, EffortResponse effort,
+        List<TimeEntryResponse> timeEntries, List<TravelEntryResponse> travelEntries,
+        boolean subtasksMandatory, int childCount, int openSubtaskCount, int completedSubtaskCount,
+        boolean mayAddSubtasks, List<ProjectTaskSummary> siblings, String cancellationWarning) {
+      this(id, version, title, summary, description, taskType, priority, status, visibility, relevantTeam,
+          ownerUserId, createdBy, parentTaskId, linkedEntity, createdAt, dueAt, plannedStartAt, plannedEndAt,
+          startedAt, completedAt, cancelledAt, archivedAt, overdue, escalationLevel, allowedNextStatuses,
+          mayAct, mayClaim, mayEdit, mayEditChecklist, requiredChecklistComplete, children, checklist, comments,
+          assignees, mayManageAssignees, masterData, history, mayViewEffort, effort, timeEntries, travelEntries,
+          subtasksMandatory, childCount, openSubtaskCount, completedSubtaskCount, mayAddSubtasks, siblings,
+          cancellationWarning, List.of(), false, false);
+    }
+  }
 }

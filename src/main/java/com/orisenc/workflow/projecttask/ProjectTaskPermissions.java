@@ -40,6 +40,7 @@ public final class ProjectTaskPermissions {
    * already occupies that role here and a second bypass would be two answers to one question.
    */
   public static final String ASSIGNEES_MANAGE = "platform.work.assignees.manage";
+  public static final String TEMPLATES_MANAGE = "platform.work.templates.manage";
 
   public static Set<String> granted() {
     var authentication = SecurityContextHolder.getContext().getAuthentication();

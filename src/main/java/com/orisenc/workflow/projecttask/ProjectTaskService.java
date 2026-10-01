@@ -91,7 +91,27 @@ public class ProjectTaskService {
   public record ListQuery(ProjectTaskStatus status, String ownerUserId, String relevantTeam,
       ProjectTaskType taskType, String parentTaskId, LinkedEntityType linkedEntityType,
       String linkedEntityId, Boolean openOnly, Boolean includeArchived, String search,
-      Boolean mine, Integer page, Integer size) {}
+      Boolean mine, Integer page, Integer size, Boolean topLevelOnly,
+      List<ProjectTaskStatus> statuses, List<TaskPriority> priorities, String assignee,
+      Boolean unclaimed, Instant dueFrom, Instant dueTo, Instant createdFrom, Instant createdTo,
+      Instant completedFrom, Instant completedTo, Boolean overdue, Boolean escalated) {
+    public ListQuery(ProjectTaskStatus status, String ownerUserId, String relevantTeam,
+        ProjectTaskType taskType, String parentTaskId, LinkedEntityType linkedEntityType,
+        String linkedEntityId, Boolean openOnly, Boolean includeArchived, String search,
+        Boolean mine, Integer page, Integer size) {
+      this(status, ownerUserId, relevantTeam, taskType, parentTaskId, linkedEntityType,
+          linkedEntityId, openOnly, includeArchived, search, mine, page, size,
+          null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+    public ListQuery(ProjectTaskStatus status, String ownerUserId, String relevantTeam,
+        ProjectTaskType taskType, String parentTaskId, LinkedEntityType linkedEntityType,
+        String linkedEntityId, Boolean openOnly, Boolean includeArchived, String search,
+        Boolean mine, Integer page, Integer size, Boolean topLevelOnly) {
+      this(status, ownerUserId, relevantTeam, taskType, parentTaskId, linkedEntityType, linkedEntityId,
+          openOnly, includeArchived, search, mine, page, size, topLevelOnly,
+          null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+  }
 
   @Transactional(readOnly = true)
   public List<ProjectTaskSummary> list(ListQuery query, String actor, Set<String> permissions) {
@@ -107,6 +127,19 @@ public class ProjectTaskService {
       parameters.putAll(audience.parameters());
     }
     if (query.status() != null) { conditions.add("t.status = :status"); parameters.put("status", query.status()); }
+    if (query.statuses() != null && !query.statuses().isEmpty()) { conditions.add("t.status in :statuses"); parameters.put("statuses", query.statuses()); }
+    if (query.priorities() != null && !query.priorities().isEmpty()) { conditions.add("t.priority in :priorities"); parameters.put("priorities", query.priorities()); }
+    validateRange(query.dueFrom(), query.dueTo(), "due"); validateRange(query.createdFrom(), query.createdTo(), "created"); validateRange(query.completedFrom(), query.completedTo(), "completed");
+    if (query.dueFrom() != null) { conditions.add("t.dueAt >= :dueFrom"); parameters.put("dueFrom", query.dueFrom()); }
+    if (query.dueTo() != null) { conditions.add("t.dueAt <= :dueTo"); parameters.put("dueTo", query.dueTo()); }
+    if (query.createdFrom() != null) { conditions.add("t.createdAt >= :createdFrom"); parameters.put("createdFrom", query.createdFrom()); }
+    if (query.createdTo() != null) { conditions.add("t.createdAt <= :createdTo"); parameters.put("createdTo", query.createdTo()); }
+    if (query.completedFrom() != null) { conditions.add("t.completedAt >= :completedFrom"); parameters.put("completedFrom", query.completedFrom()); }
+    if (query.completedTo() != null) { conditions.add("t.completedAt <= :completedTo"); parameters.put("completedTo", query.completedTo()); }
+    if (Boolean.TRUE.equals(query.unclaimed())) conditions.add("t.ownerUserId is null");
+    if (notBlank(query.assignee())) { conditions.add("(lower(t.ownerUserId) = :assignee or exists (select 1 from ProjectTaskAssigneeEntity a where a.task=t and lower(a.username)=:assignee))"); parameters.put("assignee", query.assignee().trim().toLowerCase(Locale.ROOT)); }
+    if (Boolean.TRUE.equals(query.overdue())) { conditions.add("t.dueAt < :now and t.status not in :overdueClosed and t.archivedAt is null"); parameters.put("now", clock.instant()); parameters.put("overdueClosed", List.of(ProjectTaskStatus.COMPLETED, ProjectTaskStatus.CANCELLED)); }
+    if (Boolean.TRUE.equals(query.escalated())) conditions.add("t.escalationLevel >= 2");
     if (Boolean.TRUE.equals(query.mine())) {
       // "My work" is the work that is mine to do, which since named assignees is not the same as the
       // work I own: a task somebody put me on is mine, and a list that hid it would make being
@@ -130,6 +163,7 @@ public class ProjectTaskService {
       parameters.put("team", query.relevantTeam().trim().toLowerCase(Locale.ROOT));
     }
     if (query.taskType() != null) { conditions.add("t.taskType = :type"); parameters.put("type", query.taskType()); }
+    if (Boolean.TRUE.equals(query.topLevelOnly())) conditions.add("t.parentTaskId is null");
     if (notBlank(query.parentTaskId())) {
       conditions.add("t.parentTaskId = :parent");
       parameters.put("parent", query.parentTaskId().trim());
@@ -164,9 +198,9 @@ public class ProjectTaskService {
     jpql.setMaxResults(size);
 
     var rows = jpql.getResultList();
-    Map<String, Integer> childCounts = childCounts(rows.stream().map(ProjectTaskEntity::getId).toList());
+    Map<String, ChildProgress> childCounts = childCounts(rows.stream().map(ProjectTaskEntity::getId).toList());
     Instant now = clock.instant();
-    return rows.stream().map(task -> summary(task, childCounts.getOrDefault(task.getId(), 0), now)).toList();
+    return rows.stream().map(task -> summary(task, childCounts.getOrDefault(task.getId(), ChildProgress.EMPTY), now)).toList();
   }
 
   @Transactional(readOnly = true)
@@ -177,10 +211,31 @@ public class ProjectTaskService {
 
   @Transactional
   public ProjectTaskDetail create(CreateProjectTaskRequest request, String actor, String correlationId) {
+    return createInternal(request, actor, correlationId, false);
+  }
+
+  @Transactional(readOnly = true)
+  public long count(ListQuery query, String actor, Set<String> permissions) {
+    // Count uses the same predicate path as list; loading rows to count them would make paging lie.
+    return list(query, actor, permissions).size();
+  }
+
+  private static void validateRange(Instant from, Instant to, String label) {
+    if (from != null && to != null && from.isAfter(to)) throw ApiException.badRequest(label + " date range start cannot be after its end.");
+  }
+
+  private ProjectTaskDetail createInternal(CreateProjectTaskRequest request, String actor,
+      String correlationId, boolean nested) {
     validate(request);
     Instant now = clock.instant();
     String parentId = notBlank(request.parentTaskId()) ? request.parentTaskId().trim() : null;
-    if (parentId != null) assertUsableParent(parentId, null);
+    if (parentId != null) {
+      assertUsableParent(parentId, null);
+      var parent = readable(parentId, actor, ProjectTaskPermissions.granted(), cover(actor));
+      entityManager.lock(parent, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+      if (!nested) assertMayAddSubtasks(parent, actor, ProjectTaskPermissions.granted(), cover(actor));
+      validateChildDates(request.dueAt(), request.plannedStartAt(), parent.getDueAt());
+    }
 
     var task = new ProjectTaskEntity(newId(), request.title().trim(), request.description().trim(),
         request.taskType(), request.priority(),
@@ -192,24 +247,104 @@ public class ProjectTaskService {
 
     // TM-A02 and TM-A01: optional at creation, editable for the rest of the item's life.
     task.describe(request.summary(), request.plannedStartAt(), request.plannedEndAt());
+    task.setSubtasksMandatory(request.subtasksMandatory());
+    if (parentId != null) task.beginSubtask();
+    if (parentId != null) task.placeAmongSiblings(nextSiblingOrder(parentId));
+    if (parentId != null) {
+      var parent = entityManager.find(ProjectTaskEntity.class, parentId);
+      if (parent != null) for (var follower : parent.getFollowers())
+        task.addFollower(follower.getUsername(), actor, now);
+    }
     // TM-002's customer link. The entity refuses a task that claims both a customer and a vendor.
     if (request.organizationId() != null)
       task.linkToMaster(request.organizationId(), request.customerId(), request.vendorId());
     if (request.checklist() != null) {
       for (var item : request.checklist()) {
         if (item == null || !notBlank(item.title())) continue;
-        task.addChecklistItem(item.title().trim(), Boolean.TRUE.equals(item.required()), now);
+        task.addChecklistItem(item.title().trim(), item.required() == null || item.required(), now);
       }
     }
     // The one history row TM-016 exempts from needing a comment.
     task.addHistory("CREATED", actor, null, now, correlationId);
+    if (request.followers() != null) {
+      if (request.followers().size() > 25) throw ApiException.badRequest("A task can have at most 25 followers.");
+      for (String follower : request.followers()) {
+        try { task.addFollower(follower, actor, now); }
+        catch (IllegalArgumentException e) { throw ApiException.badRequest(e.getMessage()); }
+      }
+    }
     entityManager.persist(task);
     entityManager.flush();
     // Creating a task already assigned to somebody is an assignment, and the person it landed on is
     // the one who needs to know. Creating it unassigned announces nothing: an empty queue entry is
     // not news until somebody is accountable for it.
     announceAssignment(task, actor);
+    createSubtasks(task, subtaskInputs(request.subtasks(), request.subtasksFromTemplateId()), actor, correlationId);
+    entityManager.flush();
     return detail(task, actor, ProjectTaskPermissions.granted());
+  }
+
+  private record ChildProgress(int total, int completed, int open) {
+    static final ChildProgress EMPTY = new ChildProgress(0, 0, 0);
+  }
+
+  @Transactional
+  public ProjectTaskDetail addSubtasks(String id, AddSubtasksRequest request, String actor, String correlationId) {
+    if (request == null) throw ApiException.badRequest("Subtasks are required.");
+    var permissions = ProjectTaskPermissions.granted(); var cover = cover(actor);
+    var parent = readable(id, actor, permissions, cover);
+    entityManager.lock(parent, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+    assertVersion(parent, request.expectedVersion());
+    assertMayAddSubtasks(parent, actor, permissions, cover);
+    var inputs = subtaskInputs(request.subtasks(), request.subtasksFromTemplateId());
+    if (inputs.isEmpty()) throw ApiException.badRequest("Add at least one subtask.");
+    createSubtasks(parent, inputs, actor, correlationId);
+    entityManager.flush();
+    return detail(parent, actor, permissions, cover);
+  }
+
+  private static void assertMayAddSubtasks(ProjectTaskEntity parent, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
+    if (!parent.open()) throw ApiException.conflict("Subtasks cannot be added to a closed or archived task.");
+    if (!ProjectTaskVisibilityPolicy.mayAddSubtasks(parent, actor, permissions, cover))
+      throw ApiException.forbidden("Only the parent owner, their delegate or a manager may add subtasks.");
+  }
+
+  private List<SubtaskInput> subtaskInputs(List<SubtaskInput> supplied, Long templateId) {
+    var inputs = new ArrayList<SubtaskInput>();
+    if (supplied != null) inputs.addAll(supplied);
+    if (templateId != null) {
+      var template = entityManager.find(ChecklistTemplateEntity.class, templateId);
+      if (template == null) throw ApiException.notFound("Checklist template not found.");
+      if (!template.isActive()) throw ApiException.badRequest("That checklist template is inactive.");
+      template.getItems().forEach(item -> inputs.add(new SubtaskInput(item.getTitle(), null, null, null, null)));
+    }
+    // Fifty bounds the atomic write and notification burst, and keeps the inline editor usable.
+    if (inputs.size() > 50) throw ApiException.badRequest("Add at most 50 subtasks at a time.");
+    return inputs;
+  }
+
+  private static void validateChildDates(Instant due, Instant start, Instant parentDue) {
+    if (due == null) throw ApiException.badRequest("A subtask due date is required.");
+    if (due.isAfter(parentDue)) throw ApiException.badRequest("A subtask due date cannot be after the parent due date.");
+    if (start != null && start.isAfter(due)) throw ApiException.badRequest("A subtask planned start cannot be after its due date.");
+  }
+
+  private void createSubtasks(ProjectTaskEntity parent, List<SubtaskInput> inputs, String actor, String correlationId) {
+    for (var input : inputs) {
+      if (input == null) throw ApiException.badRequest("A subtask is required.");
+      require(input.title(), "Subtask title");
+      validateChildDates(input.dueAt() == null ? parent.getDueAt() : input.dueAt(), input.plannedStartAt(), parent.getDueAt());
+      createInternal(new CreateProjectTaskRequest(input.title(), parent.getDescription(), parent.getTaskType(),
+          input.priority() == null ? TaskPriority.MEDIUM : input.priority(), parent.getVisibility(),
+          parent.getRelevantTeam(), input.ownerUserId(), parent.getLinkedEntityType(), parent.getLinkedEntityId(),
+          parent.getLinkedEntityRef(), parent.getId(), input.dueAt() == null ? parent.getDueAt() : input.dueAt(),
+          null, parent.getOrganizationId(), parent.getCustomerId(), parent.getVendorId(), null,
+          input.plannedStartAt(), null), actor, correlationId, true);
+    }
+    if (!inputs.isEmpty()) parent.addHistory("SUBTASKS_ADDED", actor,
+        ProjectTaskVisibilityPolicy.actingFor(parent, actor, cover(actor)),
+        inputs.size() + " subtasks added", clock.instant(), correlationId);
   }
 
   /**
@@ -242,6 +377,7 @@ public class ProjectTaskService {
             + ": procurement, receipt, delivery, proof of delivery, invoicing and collection.",
         ProjectTaskType.DELIVERABLE, priority, visibility, team, owner, actor,
         LinkedEntityType.SALES_ORDER, blankToNull(request.orderId()), reference, null, now, request.dueAt());
+    parent.setSubtasksMandatory(true);
     parent.addHistory("CREATED", actor, null, now, correlationId);
     entityManager.persist(parent);
 
@@ -253,7 +389,7 @@ public class ProjectTaskService {
       var child = new ProjectTaskEntity(newId(), String.format(stage.titleFormat(), reference),
           stage.description(), stage.taskType(), priority, visibility, team, owner, actor,
           stage.linkedEntityType(), null, reference, parent.getId(), now, stageDue);
-      stage.checklist().forEach(item -> child.addChecklistItem(item, true, now));
+      stage.checklist().forEach(item -> child.addChecklistItem(item, true, ChecklistItemSource.SYSTEM, now));
       child.addHistory("CREATED", actor, null, now, correlationId);
       entityManager.persist(child);
     }
@@ -267,22 +403,38 @@ public class ProjectTaskService {
     var permissions = ProjectTaskPermissions.granted();
     var cover = cover(actor);
     var task = readable(id, actor, permissions, cover);
+    // The parent serializes hierarchy writes with completion; child state changes take it first.
+    if (task.getParentTaskId() != null) {
+      var parent = entityManager.find(ProjectTaskEntity.class, task.getParentTaskId(),
+          jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
+      if (parent != null && parent.isSubtasksMandatory() && parent.getStatus() == ProjectTaskStatus.COMPLETED
+          && !request.status().closed())
+        throw ApiException.badRequest("Reopen the parent before reopening a mandatory subtask.");
+    }
+    entityManager.lock(task, jakarta.persistence.LockModeType.PESSIMISTIC_WRITE);
     assertVersion(task, request.expectedVersion());
     if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover))
       throw ApiException.forbidden(
           "Only the owner of this work item, or somebody they have delegated it to, can change its status.");
     if (task.getArchivedAt() != null) throw ApiException.conflict("This work item is archived.");
 
-    if (request.status() == ProjectTaskStatus.COMPLETED && !task.requiredChecklistComplete())
-      throw ApiException.badRequest("Every required checklist item must be completed first.");
+    if (request.status() == ProjectTaskStatus.COMPLETED && !task.requiredChecklistComplete()) {
+      var open = task.getChecklist().stream().filter(ProjectTaskChecklistItemEntity::isRequired)
+          .filter(item -> !item.isCompleted()).map(ProjectTaskChecklistItemEntity::getTitle).toList();
+      throw ApiException.badRequest(open.size() + " required checklist item"
+          + (open.size() == 1 ? " is" : "s are") + " still open: " + String.join(", ", open) + ".");
+    }
 
     ProjectTaskStatus previous = task.getStatus();
     // Who the actor is standing in for, or null when it is their own work. Written onto the history
     // row so the audit answers both "who did it" and "whose authority was used" (REQ-0027).
     String onBehalfOf = ProjectTaskVisibilityPolicy.actingFor(task, actor, cover);
     try {
-      task.transition(request.status(), actor, onBehalfOf, request.comment(), clock.instant(),
-          correlationId);
+    validateMentions(task, request.mentions(), actor);
+    task.transition(request.status(), actor, onBehalfOf, request.comment(), clock.instant(),
+        correlationId, request.status() == ProjectTaskStatus.COMPLETED ? children(task.getId()) : null);
+    if (request.mentions() != null && !request.mentions().isEmpty())
+      task.addComment(actor, request.comment().trim(), request.mentions(), clock.instant());
     } catch (IllegalArgumentException rejected) {
       // The entity guards the lifecycle; the service only translates its refusal to the API contract.
       throw ApiException.badRequest(rejected.getMessage());
@@ -363,9 +515,67 @@ public class ProjectTaskService {
         && !permissions.contains(ProjectTaskPermissions.MANAGE))
       throw ApiException.forbidden("Your role does not permit commenting on work items.");
 
-    task.addComment(actor, request.body().trim(), clock.instant());
+    validateMentions(task, request.mentions(), actor);
+    task.addComment(actor, request.body().trim(), request.mentions() == null ? List.of() : request.mentions(), clock.instant());
     entityManager.flush();
     return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail addFollower(String id, FollowerRequest request, String actor, String correlationId) {
+    if (request == null || !notBlank(request.username())) throw ApiException.badRequest("A username is required.");
+    var permissions = ProjectTaskPermissions.granted(); var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    if (!task.open()) throw ApiException.conflict("Followers cannot be changed on a closed or archived task.");
+    if (!canManageFollowers(task, actor, permissions, cover) && !task.isFollower(actor)
+        && !ProjectTaskVisibilityPolicy.mayView(task, actor, permissions, cover))
+      throw ApiException.forbidden("You cannot manage followers for this task.");
+    try { task.addFollower(request.username(), actor, clock.instant()); }
+    catch (IllegalArgumentException e) { throw ApiException.conflict(e.getMessage()); }
+    task.addHistory("FOLLOWER_ADDED", actor, request.username().trim(), clock.instant(), correlationId);
+    entityManager.flush(); return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail follow(String id, String actor, String correlationId) {
+    return addFollower(id, new FollowerRequest(actor), actor, correlationId);
+  }
+
+  @Transactional
+  public ProjectTaskDetail removeFollower(String id, String username, String actor, String correlationId) {
+    var permissions = ProjectTaskPermissions.granted(); var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    if (!task.open()) throw ApiException.conflict("Followers cannot be changed on a closed or archived task.");
+    boolean self = actor.equalsIgnoreCase(username);
+    if (!self && !canManageFollowers(task, actor, permissions, cover))
+      throw ApiException.forbidden("You cannot manage followers for this task.");
+    try { task.removeFollower(username); } catch (IllegalArgumentException e) { throw ApiException.notFound(e.getMessage()); }
+    task.addHistory("FOLLOWER_REMOVED", actor, username, clock.instant(), correlationId);
+    entityManager.flush(); return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail unfollow(String id, String actor, String correlationId) {
+    return removeFollower(id, actor, actor, correlationId);
+  }
+
+  private boolean canManageFollowers(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
+    return permissions.contains(ProjectTaskPermissions.MANAGE)
+        || ProjectTaskVisibilityPolicy.mayEdit(task, actor, permissions, cover)
+        || ProjectTaskVisibilityPolicy.actingFor(task, actor, cover) != null;
+  }
+
+  /** Interim audience check until TM-009 supplies authoritative team membership. */
+  private void validateMentions(ProjectTaskEntity task, List<String> mentions, String actor) {
+    if (mentions == null) return;
+    for (String mention : mentions.stream().filter(ProjectTaskService::notBlank).map(String::trim).distinct().toList()) {
+      boolean connected = actor.equalsIgnoreCase(mention) || task.isFollower(mention)
+          || task.isAssignee(mention) || (task.getOwnerUserId() != null && task.getOwnerUserId().equalsIgnoreCase(mention))
+          || task.getCreatedBy().equalsIgnoreCase(mention);
+      if (task.getVisibility() != ProjectTaskVisibility.ALL_TEAMS && !connected)
+        throw ApiException.badRequest(mention + " can't see this task. Add them as a follower first.");
+    }
   }
 
   /**
@@ -463,6 +673,71 @@ public class ProjectTaskService {
     return detail(task, actor, permissions, cover);
   }
 
+  @Transactional
+  public ProjectTaskDetail addChecklistItems(String id, ChecklistItemsWriteRequest request, String actor,
+      String correlationId) {
+    if (request == null) throw ApiException.badRequest("Checklist items are required.");
+    var permissions = ProjectTaskPermissions.granted();
+    var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover);
+    assertVersion(task, request.expectedVersion());
+    assertMayEditChecklist(task, actor, permissions, cover);
+    Instant now = clock.instant();
+    int added = 0;
+    if (request.templateId() != null) {
+      var template = entityManager.find(ChecklistTemplateEntity.class, request.templateId());
+      if (template == null) throw ApiException.notFound("Checklist template not found.");
+      if (!template.isActive()) throw ApiException.badRequest("That checklist template is inactive.");
+      for (var item : template.getItems()) {
+        task.addChecklistItem(item.getTitle(), item.isRequired(), ChecklistItemSource.TEMPLATE, now);
+        task.addHistory("CHECKLIST_ADDED", actor, item.getTitle(), now, correlationId);
+        added++;
+      }
+    }
+    if (request.items() != null) for (var item : request.items()) {
+      if (item == null || !notBlank(item.title())) continue;
+      task.addChecklistItem(item.title(), item.required() == null || item.required(), ChecklistItemSource.MANUAL, now);
+      task.addHistory("CHECKLIST_ADDED", actor, item.title().trim(), now, correlationId);
+      added++;
+    }
+    if (added == 0) throw ApiException.badRequest("Add at least one checklist item or choose a template.");
+    entityManager.flush();
+    return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail editChecklistItem(String id, Long itemId, ChecklistItemUpdateRequest request,
+      String actor, String correlationId) {
+    if (request == null) throw ApiException.badRequest("A checklist item body is required.");
+    var permissions = ProjectTaskPermissions.granted(); var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover); assertVersion(task, request.expectedVersion());
+    assertMayEditChecklist(task, actor, permissions, cover);
+    var item = guard(() -> task.checklistItem(itemId));
+    String old = item.getTitle();
+    guard(() -> { task.editChecklistItem(item, request.title(), request.required() == null || request.required()); return item; });
+    task.addHistory("CHECKLIST_EDITED", actor, old + " -> " + item.getTitle(), clock.instant(), correlationId);
+    entityManager.flush(); return detail(task, actor, permissions, cover);
+  }
+
+  @Transactional
+  public ProjectTaskDetail removeChecklistItem(String id, Long itemId, Long expectedVersion,
+      String actor, String correlationId) {
+    var permissions = ProjectTaskPermissions.granted(); var cover = cover(actor);
+    var task = readable(id, actor, permissions, cover); assertVersion(task, expectedVersion);
+    assertMayEditChecklist(task, actor, permissions, cover);
+    var item = guard(() -> task.checklistItem(itemId)); String title = item.getTitle();
+    guard(() -> { task.removeChecklistItem(item); return item; });
+    task.addHistory("CHECKLIST_REMOVED", actor, title, clock.instant(), correlationId);
+    entityManager.flush(); return detail(task, actor, permissions, cover);
+  }
+
+  private static void assertMayEditChecklist(ProjectTaskEntity task, String actor,
+      Set<String> permissions, List<DelegationCover> cover) {
+    if (!ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover)
+        && !permissions.contains(ProjectTaskPermissions.MANAGE))
+      throw ApiException.forbidden("Only the people working this item, or a workflow manager, can change its checklist.");
+  }
+
   // ---------------------------------------------------------------- editing (TM-A03)
 
   /**
@@ -493,6 +768,18 @@ public class ProjectTaskService {
           "Only the owner of this work item, whoever raised it, or a manager can change its details.");
     }
 
+    if (request.subtasksMandatory() != null && request.subtasksMandatory() != task.isSubtasksMandatory()) {
+      boolean old = task.isSubtasksMandatory();
+      guard(() -> { task.setSubtasksMandatory(request.subtasksMandatory()); return task; });
+      task.addHistory("FIELD_CHANGED", actor, "Mandatory subtasks changed from " + old
+          + " to " + request.subtasksMandatory(), clock.instant(), correlationId);
+    }
+    if (request.parentTaskId() != null) {
+      var parent = entityManager.find(ProjectTaskEntity.class, request.parentTaskId());
+      if (parent != null) validateChildDates(request.dueAt(), request.plannedStartAt(), parent.getDueAt());
+    }
+    if (request.dueAt() != null && children(task.getId()).stream().anyMatch(child -> child.getDueAt().isAfter(request.dueAt())))
+      throw ApiException.badRequest("The task due date cannot be before a subtask due date.");
     String newParent = blankToNull(request.parentTaskId());
     // Checked before the entity applies anything: a cycle needs the other rows in the table to
     // detect, which is knowledge the entity does not and should not have.
@@ -858,22 +1145,33 @@ public class ProjectTaskService {
       throw ApiException.badRequest("The work item hierarchy is too deep.");
   }
 
-  private Map<String, Integer> childCounts(List<String> parentIds) {
+  private Map<String, ChildProgress> childCounts(List<String> parentIds) {
     if (parentIds.isEmpty()) return Map.of();
-    var counts = new LinkedHashMap<String, Integer>();
+    var counts = new LinkedHashMap<String, ChildProgress>();
     entityManager.createQuery(
-            "select t.parentTaskId, count(t) from ProjectTaskEntity t"
+            "select t.parentTaskId, count(t), "
+                + "sum(case when t.status = com.orisenc.workflow.projecttask.ProjectTaskStatus.COMPLETED then 1 else 0 end), "
+                + "sum(case when t.status not in (com.orisenc.workflow.projecttask.ProjectTaskStatus.COMPLETED, "
+                + "com.orisenc.workflow.projecttask.ProjectTaskStatus.CANCELLED) then 1 else 0 end) from ProjectTaskEntity t"
                 + " where t.parentTaskId in :ids and t.archivedAt is null group by t.parentTaskId", Object[].class)
         .setParameter("ids", parentIds).getResultList()
-        .forEach(row -> counts.put((String) row[0], ((Number) row[1]).intValue()));
+        .forEach(row -> counts.put((String) row[0], new ChildProgress(((Number) row[1]).intValue(), ((Number) row[2]).intValue(), ((Number) row[3]).intValue())));
     return counts;
   }
 
   private List<ProjectTaskEntity> children(String parentId) {
     return entityManager.createQuery(
             "select t from ProjectTaskEntity t where t.parentTaskId = :parent and t.archivedAt is null"
-                + " order by t.dueAt asc, t.id asc", ProjectTaskEntity.class)
+                + " order by t.siblingOrder asc, t.dueAt asc, t.id asc", ProjectTaskEntity.class)
         .setParameter("parent", parentId).getResultList();
+  }
+
+  /** One past the highest position under this parent, archived children included, so a position is never reused. */
+  private int nextSiblingOrder(String parentId) {
+    Integer highest = entityManager.createQuery(
+            "select max(t.siblingOrder) from ProjectTaskEntity t where t.parentTaskId = :parent", Integer.class)
+        .setParameter("parent", parentId).getSingleResult();
+    return highest == null ? 1 : highest + 1;
   }
 
   private static String newId() {
@@ -890,12 +1188,12 @@ public class ProjectTaskService {
 
   // ---------------------------------------------------------------- mapping
 
-  private ProjectTaskSummary summary(ProjectTaskEntity task, int childCount, Instant now) {
+  private ProjectTaskSummary summary(ProjectTaskEntity task, ChildProgress progress, Instant now) {
     return new ProjectTaskSummary(task.getId(), task.getVersion(), task.getTitle(), task.getTaskType(),
         task.getPriority(), task.getStatus(), task.getVisibility(), task.getRelevantTeam(),
         task.getOwnerUserId(), task.getParentTaskId(), linked(task), task.getCreatedAt(), task.getDueAt(),
-        task.getCompletedAt(), task.overdue(now), task.getEscalationLevel(), childCount,
-        task.getArchivedAt() != null);
+        task.getCompletedAt(), task.overdue(now), task.getEscalationLevel(), progress.total(),
+        task.getArchivedAt() != null, progress.open(), progress.completed());
   }
 
   private ProjectTaskDetail detail(ProjectTaskEntity task, String actor, Set<String> permissions) {
@@ -909,7 +1207,16 @@ public class ProjectTaskService {
     // audit trail and the linked customer hang off this; TM-014 and TM-012 draw the line here.
     boolean entitled = ProjectTaskVisibilityPolicy.isEntitled(task, actor, permissions, cover);
     var childEntities = children(task.getId());
-    var childSummaries = childEntities.stream().map(child -> summary(child, 0, now)).toList();
+    var nestedCounts = childCounts(childEntities.stream().map(ProjectTaskEntity::getId).toList());
+    var childSummaries = childEntities.stream()
+        .filter(child -> ProjectTaskVisibilityPolicy.mayView(child, actor, permissions, cover))
+        .map(child -> summary(child, nestedCounts.getOrDefault(child.getId(), ChildProgress.EMPTY), now)).toList();
+    int openCount = (int) childEntities.stream().filter(child -> !child.getStatus().closed()).count();
+    int completedCount = (int) childEntities.stream().filter(child -> child.getStatus() == ProjectTaskStatus.COMPLETED).count();
+    var siblings = task.getParentTaskId() == null ? List.<ProjectTaskSummary>of()
+        : children(task.getParentTaskId()).stream()
+            .filter(child -> ProjectTaskVisibilityPolicy.mayView(child, actor, permissions, cover))
+            .map(child -> summary(child, ChildProgress.EMPTY, now)).toList();
     // Individual effort is held closer than the item itself: an all-teams task is readable across
     // the organization, and "this person spent fourteen hours on it" should not be (TM-A05).
     boolean mayViewEffort = ProjectTaskVisibilityPolicy.mayViewEffort(task, actor, permissions, cover);
@@ -925,12 +1232,15 @@ public class ProjectTaskService {
         ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover),
         ProjectTaskVisibilityPolicy.mayClaim(task, actor, permissions, cover),
         ProjectTaskVisibilityPolicy.mayEdit(task, actor, permissions, cover),
+        task.getArchivedAt() == null && !task.getStatus().closed()
+            && (ProjectTaskVisibilityPolicy.mayAct(task, actor, permissions, cover)
+                || permissions.contains(ProjectTaskPermissions.MANAGE)),
         task.requiredChecklistComplete(), childSummaries,
         task.getChecklist().stream().map(item -> new ChecklistItemResponse(item.getId(), item.getSequenceNo(),
-            item.getTitle(), item.isRequired(), item.isCompleted(), item.getCompletedBy(),
+            item.getTitle(), item.isRequired(), item.getSource(), item.isCompleted(), item.getCompletedBy(),
             item.getCompletedAt())).toList(),
         task.getComments().stream().map(entry -> new CommentResponse(entry.getId(), entry.getAuthor(),
-            entry.getBody(), entry.getCreatedAt())).toList(),
+            entry.getBody(), entry.getCreatedAt(), entry.getMentions().stream().map(ProjectTaskCommentMentionEntity::getUsername).toList())).toList(),
         task.getAssignees().stream().map(ProjectTaskService::assignee).toList(),
         permissions.contains(ProjectTaskPermissions.ASSIGNEES_MANAGE),
         entitled ? new MasterDataResponse(task.getOrganizationId(), task.getCustomerId(),
@@ -947,7 +1257,12 @@ public class ProjectTaskService {
         mayViewEffort ? task.getTimeEntries().stream()
             .map(entry -> timeEntry(entry, actor)).toList() : List.of(),
         mayViewEffort ? task.getTravelEntries().stream()
-            .map(entry -> travelEntry(entry, actor)).toList() : List.of());
+             .map(entry -> travelEntry(entry, actor)).toList() : List.of(),
+        task.isSubtasksMandatory(), childEntities.size(), openCount, completedCount,
+        ProjectTaskVisibilityPolicy.mayAddSubtasks(task, actor, permissions, cover), siblings,
+        openCount == 0 ? null : "Cancelling this task leaves " + openCount + " open subtasks unchanged.",
+        task.getFollowers().stream().map(ProjectTaskFollowerEntity::getUsername).toList(), task.isFollower(actor),
+        canManageFollowers(task, actor, permissions, cover));
   }
 
   /**

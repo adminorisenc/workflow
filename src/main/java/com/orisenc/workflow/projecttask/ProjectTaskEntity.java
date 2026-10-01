@@ -59,6 +59,27 @@ public class ProjectTaskEntity {
    * exists and that the link creates no cycle.
    */
   @Column(name = "parent_task_id", length = 40) private String parentTaskId;
+  @Column(name = "subtasks_mandatory", columnDefinition = "boolean not null default false")
+  private boolean subtasksMandatory;
+
+  public boolean isSubtasksMandatory() { return subtasksMandatory; }
+
+  public void setSubtasksMandatory(boolean mandatory) {
+    if (!open()) throw new IllegalArgumentException("Reopen the task before changing mandatory subtasks.");
+    subtasksMandatory = mandatory;
+  }
+
+  /** Children are explicitly loaded by the transaction; archived and cancelled work is settled. */
+  public void assertSubtasksComplete(List<ProjectTaskEntity> children) {
+    if (!subtasksMandatory) return;
+    var open = children.stream().filter(child -> child.getArchivedAt() == null)
+        .filter(child -> !child.getStatus().closed()).map(ProjectTaskEntity::getId).toList();
+    if (!open.isEmpty()) throw new IllegalArgumentException(open.size() + " subtask"
+        + (open.size() == 1 ? " is" : "s are") + " still open: " + String.join(", ", open));
+  }
+
+  /** Initial system status has no manual transition comment requirement (TM-016). */
+  void beginSubtask() { status = ProjectTaskStatus.NOT_STARTED; }
 
   @Column(nullable = false, length = 200) private String title;
   @Column(nullable = false, length = 4000) private String description;
@@ -94,6 +115,14 @@ public class ProjectTaskEntity {
 
   @Column(name = "created_at", nullable = false) private Instant createdAt;
   @Column(name = "due_at", nullable = false) private Instant dueAt;
+
+  /**
+   * Position among its siblings, in the order they were entered. Subtasks added together share a
+   * due date and a creation instant, and the id is random, so without this they listed in an
+   * arbitrary order. Existing rows default to 0 and fall back to due date then id.
+   */
+  @Column(name = "sibling_order", columnDefinition = "integer not null default 0")
+  private int siblingOrder;
 
   /**
    * When the owner intends to start and finish (TM-A01).
@@ -150,6 +179,8 @@ public class ProjectTaskEntity {
    */
   @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
   @OrderBy("username ASC") private List<ProjectTaskAssigneeEntity> assignees = new ArrayList<>();
+  @OneToMany(mappedBy = "task", cascade = CascadeType.ALL, orphanRemoval = true)
+  @OrderBy("username ASC") private List<ProjectTaskFollowerEntity> followers = new ArrayList<>();
 
   /**
    * Effort logged against this item, and journeys made for it (TM-A05, TM-A06).
@@ -212,6 +243,15 @@ public class ProjectTaskEntity {
    */
   public void transition(ProjectTaskStatus next, String actor, String onBehalfOf, String reason,
       Instant time, String correlationId) {
+    transition(next, actor, onBehalfOf, reason, time, correlationId, null);
+  }
+
+  public void transition(ProjectTaskStatus next, String actor, String onBehalfOf, String reason,
+      Instant time, String correlationId, List<ProjectTaskEntity> children) {
+    if (next == ProjectTaskStatus.COMPLETED && subtasksMandatory) {
+      if (children == null) throw new IllegalArgumentException("Subtask completion evidence is required.");
+      assertSubtasksComplete(children);
+    }
     if (next == null) throw new IllegalArgumentException("A target status is required");
     if (reason == null || reason.isBlank())
       throw new IllegalArgumentException("A comment is required for every status change");
@@ -529,12 +569,51 @@ public class ProjectTaskEntity {
   }
 
   public void addComment(String author, String body, Instant time) {
-    comments.add(new ProjectTaskCommentEntity(this, author, body, time));
+    addComment(author, body, List.of(), time);
+  }
+
+  public void addComment(String author, String body, List<String> mentionedUsers, Instant time) {
+    var comment = new ProjectTaskCommentEntity(this, author, body, time);
+    comments.add(comment);
+    mentionedUsers.stream().filter(java.util.Objects::nonNull).map(String::trim)
+        .filter(value -> !value.isEmpty()).map(value -> value.toLowerCase(java.util.Locale.ROOT))
+        .distinct().forEach(comment::addMention);
   }
 
   public void addChecklistItem(String itemTitle, boolean required, Instant time) {
+    addChecklistItem(itemTitle, required, ChecklistItemSource.MANUAL, time);
+  }
+
+  public ProjectTaskChecklistItemEntity addChecklistItem(String itemTitle, boolean required,
+      ChecklistItemSource source, Instant time) {
+    assertChecklistEditable();
     int next = checklist.stream().mapToInt(ProjectTaskChecklistItemEntity::getSequenceNo).max().orElse(0) + 1;
-    checklist.add(new ProjectTaskChecklistItemEntity(this, next, itemTitle, required, time));
+    var item = new ProjectTaskChecklistItemEntity(this, next, itemTitle, required, source, time);
+    checklist.add(item);
+    return item;
+  }
+
+  public ProjectTaskChecklistItemEntity checklistItem(Long itemId) {
+    return checklist.stream().filter(item -> item.getId().equals(itemId)).findFirst()
+        .orElseThrow(() -> new IllegalArgumentException("Checklist item not found."));
+  }
+
+  public void editChecklistItem(ProjectTaskChecklistItemEntity item, String title, boolean required) {
+    assertChecklistEditable();
+    if (!checklist.contains(item)) throw new IllegalArgumentException("Checklist item not found.");
+    item.edit(title, required);
+  }
+
+  public void removeChecklistItem(ProjectTaskChecklistItemEntity item) {
+    assertChecklistEditable();
+    if (!checklist.contains(item)) throw new IllegalArgumentException("Checklist item not found.");
+    item.assertRemovable();
+    checklist.remove(item);
+  }
+
+  private void assertChecklistEditable() {
+    if (archivedAt != null) throw new IllegalArgumentException("This work item is archived; its checklist cannot be changed.");
+    if (status.closed()) throw new IllegalArgumentException("Reopen this work item before changing its checklist.");
   }
 
   /**
@@ -616,6 +695,8 @@ public class ProjectTaskEntity {
   public String getLinkedEntityRef() { return linkedEntityRef; }
   public Instant getCreatedAt() { return createdAt; }
   public Instant getDueAt() { return dueAt; }
+  public int getSiblingOrder() { return siblingOrder; }
+  void placeAmongSiblings(int position) { this.siblingOrder = position; }
   public Instant getPlannedStartAt() { return plannedStartAt; }
   public Instant getPlannedEndAt() { return plannedEndAt; }
   public Instant getStartedAt() { return startedAt; }
@@ -632,6 +713,22 @@ public class ProjectTaskEntity {
   public List<ProjectTaskChecklistItemEntity> getChecklist() { return List.copyOf(checklist); }
 
   public List<ProjectTaskAssigneeEntity> getAssignees() { return List.copyOf(assignees); }
+  public List<ProjectTaskFollowerEntity> getFollowers() { return List.copyOf(followers); }
+  public boolean isFollower(String username) {
+    return username != null && followers.stream().anyMatch(f -> f.getUsername().equalsIgnoreCase(username));
+  }
+  public ProjectTaskFollowerEntity addFollower(String username, String addedBy, Instant time) {
+    if (username == null || username.isBlank()) throw new IllegalArgumentException("A username is required.");
+    if (followers.size() >= 25) throw new IllegalArgumentException("A task can have at most 25 followers.");
+    String normalized = username.trim().toLowerCase(java.util.Locale.ROOT);
+    if (isFollower(normalized)) throw new IllegalArgumentException(normalized + " already follows this task.");
+    var follower = new ProjectTaskFollowerEntity(this, normalized, addedBy, time); followers.add(follower); return follower;
+  }
+  public ProjectTaskFollowerEntity removeFollower(String username) {
+    var match = followers.stream().filter(f -> f.getUsername().equalsIgnoreCase(username)).findFirst()
+        .orElseThrow(() -> new IllegalArgumentException("That user is not following this task."));
+    followers.remove(match); return match;
+  }
 
   public void linkToMaster(Long organizationId, Long customerId, Long vendorId) {
     if (organizationId == null) throw new IllegalArgumentException("Organization id is required.");

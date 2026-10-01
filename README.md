@@ -40,6 +40,8 @@ Run `./gradlew bootRun`. The defaults are:
 | `POST` | `/api/tasks` | `platform.task.create` |
 | `POST` | `/api/tasks/{id}/actions` | `platform.task.view`, then `platform.task.execute` or `platform.task.approve` |
 | `POST` | `/api/sla/run` | `platform.work.manage` |
+| `GET` | `/api/checklist-templates` | `platform.work.create` |
+| `POST`, `PUT`, activate/deactivate | `/api/checklist-templates/**` | `platform.work.templates.manage` |
 | `GET` | `/api/delegations`, `/api/delegations/{id}` | `platform.delegation.view` |
 | `POST` | `/api/delegations` | `platform.delegation.create` |
 | `POST` | `/api/delegations/{id}/approve`, `/api/delegations/{id}/reject` | `platform.delegation.approve` |
@@ -51,8 +53,14 @@ Common Platform owns the permission catalogue; Workflow owns the task records an
 The work item API lives at `/api/project-tasks` under the separate `platform.work.*` family; see
 `MIGRATION_REST_CONTRACTS.md` for its full surface.
 
+Checklist templates are snapshots: importing one copies its current ordered items into the task.
+Later template edits do not alter existing tasks. Active templates are visible to every task creator;
+per-template audiences remain an explicit interim gap.
+
 Hibernate creates `workflow_task`, `workflow_task_history`, `project_task`, `project_task_history`,
-`project_task_comment` and `project_task_checklist_item` in this service's database. Production must
+`project_task_comment`, `project_task_checklist_item`, `checklist_template` and
+`checklist_template_item` in this service's database. The new `item_source` column defaults existing
+task checklist rows to `MANUAL`; order-chain evidence is `SYSTEM` and cannot be removed. Production must
 replace `ddl-auto=update` with versioned migrations and `validate` before go-live.
 
 ## SLA and escalation

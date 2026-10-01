@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
+import java.time.Instant;
+import com.orisenc.workflow.task.TaskPriority;
 
 /**
  * REST layer for project work items.
@@ -39,7 +41,6 @@ public class ProjectTaskController {
   @GetMapping
   @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
   public List<ProjectTaskSummary> list(
-      @RequestParam(required = false) ProjectTaskStatus status,
       @RequestParam(required = false) String owner,
       @RequestParam(required = false) String team,
       @RequestParam(required = false) ProjectTaskType type,
@@ -50,11 +51,29 @@ public class ProjectTaskController {
       @RequestParam(required = false) Boolean includeArchived,
       @RequestParam(required = false) String q,
       @RequestParam(required = false) Boolean mine,
+      @RequestParam(required = false) Boolean topLevelOnly,
+      @RequestParam(required = false, name = "status") List<ProjectTaskStatus> statuses,
+      @RequestParam(required = false, name = "priority") List<TaskPriority> priorities,
+      @RequestParam(required = false) String assignee, @RequestParam(required = false) Boolean unclaimed,
+      @RequestParam(required = false) Instant dueFrom, @RequestParam(required = false) Instant dueTo,
+      @RequestParam(required = false) Instant createdFrom, @RequestParam(required = false) Instant createdTo,
+      @RequestParam(required = false) Instant completedFrom, @RequestParam(required = false) Instant completedTo,
+      @RequestParam(required = false) Boolean overdue, @RequestParam(required = false) Boolean escalated,
       @RequestParam(required = false) Integer page,
       @RequestParam(required = false) Integer size) {
-    var query = new ProjectTaskService.ListQuery(status, owner, team, type, parent, linkedType, linkedId,
-        openOnly, includeArchived, q, mine, page, size);
+    var query = new ProjectTaskService.ListQuery(null, owner, team, type, parent, linkedType, linkedId,
+        openOnly, includeArchived, q, mine, page, size, topLevelOnly, statuses, priorities, assignee, unclaimed,
+        dueFrom, dueTo, createdFrom, createdTo, completedFrom, completedTo, overdue, escalated);
     return service.list(query, actor(), ProjectTaskPermissions.granted());
+  }
+
+  @GetMapping("/count")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public java.util.Map<String, Long> count(@RequestParam(required=false) List<ProjectTaskStatus> status,
+      @RequestParam(required=false) List<TaskPriority> priority) {
+    var q = new ProjectTaskService.ListQuery(null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+        status,priority,null,null,null,null,null,null,null,null,null,null);
+    return java.util.Map.of("total", service.count(q, actor(), ProjectTaskPermissions.granted()));
   }
 
   @GetMapping("/{id}")
@@ -68,6 +87,14 @@ public class ProjectTaskController {
   public ResponseEntity<ProjectTaskDetail> create(@RequestBody CreateProjectTaskRequest body,
       @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
     return ResponseEntity.status(201).body(service.create(body, actor(), correlationId(correlationId)));
+  }
+
+  @PostMapping(path = "/{id}/subtasks", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ResponseEntity<ProjectTaskDetail> addSubtasks(@PathVariable String id,
+      @RequestBody AddSubtasksRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return ResponseEntity.status(201).body(service.addSubtasks(id, body, actor(), correlationId(correlationId)));
   }
 
   /** Creates the fulfilment chain for one customer order: the parent item and every stage under it. */
@@ -111,6 +138,34 @@ public class ProjectTaskController {
   @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
   public ProjectTaskDetail comment(@PathVariable String id, @RequestBody CommentRequest body) {
     return service.comment(id, body, actor());
+  }
+
+  @PostMapping(path = "/{id}/followers", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail addFollower(@PathVariable String id, @RequestBody FollowerRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.addFollower(id, body, actor(), correlationId(correlationId));
+  }
+
+  @DeleteMapping("/{id}/followers/{username}")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail removeFollower(@PathVariable String id, @PathVariable String username,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.removeFollower(id, username, actor(), correlationId(correlationId));
+  }
+
+  @PostMapping("/{id}/follow")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail follow(@PathVariable String id,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.follow(id, actor(), correlationId(correlationId));
+  }
+
+  @PostMapping("/{id}/unfollow")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail unfollow(@PathVariable String id,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.unfollow(id, actor(), correlationId(correlationId));
   }
 
   /**
@@ -217,6 +272,30 @@ public class ProjectTaskController {
       @RequestBody(required = false) ChecklistToggleRequest body,
       @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
     return service.toggleChecklistItem(id, itemId, body, actor(), correlationId(correlationId));
+  }
+
+  @PostMapping(path = "/{id}/checklist", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail addChecklistItems(@PathVariable String id,
+      @RequestBody ChecklistItemsWriteRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.addChecklistItems(id, body, actor(), correlationId(correlationId));
+  }
+
+  @PutMapping(path = "/{id}/checklist/{itemId}", consumes = "application/json")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail editChecklistItem(@PathVariable String id, @PathVariable Long itemId,
+      @RequestBody ChecklistItemUpdateRequest body,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.editChecklistItem(id, itemId, body, actor(), correlationId(correlationId));
+  }
+
+  @DeleteMapping("/{id}/checklist/{itemId}")
+  @PreAuthorize("hasAuthority('" + ProjectTaskPermissions.VIEW + "')")
+  public ProjectTaskDetail removeChecklistItem(@PathVariable String id, @PathVariable Long itemId,
+      @RequestParam Long expectedVersion,
+      @RequestHeader(value = CORRELATION_ID_HEADER, required = false) String correlationId) {
+    return service.removeChecklistItem(id, itemId, expectedVersion, actor(), correlationId(correlationId));
   }
 
   /**

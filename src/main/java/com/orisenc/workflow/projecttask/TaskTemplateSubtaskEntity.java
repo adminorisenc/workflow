@@ -1,0 +1,3 @@
+package com.orisenc.workflow.projecttask;
+import jakarta.persistence.*;
+@Entity @Table(name="task_template_subtask") public class TaskTemplateSubtaskEntity { @Id @GeneratedValue(strategy=GenerationType.IDENTITY) Long id; @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="template_id",nullable=false) TaskTemplateEntity template; @Column(name="sequence_no",nullable=false) int sequenceNo; @Column(nullable=false,length=200) String title; protected TaskTemplateSubtaskEntity(){} TaskTemplateSubtaskEntity(TaskTemplateEntity t,int n,String s){template=t;sequenceNo=n;title=s;} public String getTitle(){return title;} }
