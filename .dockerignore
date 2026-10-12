@@ -1,0 +1,15 @@
+.git
+.gradle
+build
+out
+.idea
+*.iml
+*.log
+
+src/main/resources/application-local.yml
+src/main/resources/application-*.local.yml
+
+.env
+.env.*
+docker-compose*.yml
+docker-compose*.yaml
