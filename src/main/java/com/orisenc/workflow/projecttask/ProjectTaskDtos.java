@@ -28,7 +28,13 @@ public final class ProjectTaskDtos {
       /* TM-002's customer link. Optional, and a task carries a customer or a vendor, never both. */
       Long organizationId, Long customerId, Long vendorId,
       /* TM-A02 and TM-A01. All three optional at creation and editable afterwards. */
-      String summary, Instant plannedStartAt, Instant plannedEndAt) {}
+      String summary, Instant plannedStartAt, Instant plannedEndAt,
+      /*
+       * People working this item alongside its owner, named at creation instead of added one at a
+       * time afterwards through /assignees. Requires ASSIGNEES_MANAGE, same as that endpoint - naming
+       * co-workers here is the same supervisory decision, just made at creation time.
+       */
+      List<String> assignees) {}
 
   /**
    * The whole editable state of a work item (TM-A03).

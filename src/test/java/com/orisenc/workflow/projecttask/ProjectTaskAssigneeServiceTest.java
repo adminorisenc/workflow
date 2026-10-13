@@ -320,7 +320,7 @@ class ProjectTaskAssigneeServiceTest {
     var created = workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
         "Chase the PO", "Customer has not sent it.", ProjectTaskType.FOLLOW_UP, TaskPriority.MEDIUM,
         ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.CUSTOMER, "42",
-        "Northstar Medical", null, DUE, null, 7L, 42L, null, null, null, null), OWNER, "c");
+        "Northstar Medical", null, DUE, null, 7L, 42L, null, null, null, null, null), OWNER, "c");
 
     // The column existed on the entity and no create path had ever populated it, so TM-002's
     // customer link was modelled and never wired.
@@ -330,8 +330,46 @@ class ProjectTaskAssigneeServiceTest {
     assertThatThrownBy(() -> workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
         "Both", "Not allowed.", ProjectTaskType.FOLLOW_UP, TaskPriority.MEDIUM,
         ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.NONE, null, null,
-        null, DUE, null, 7L, 42L, 9L, null, null, null), OWNER, "c"))
+        null, DUE, null, 7L, 42L, 9L, null, null, null, null), OWNER, "c"))
         .isInstanceOf(Exception.class);
+  }
+
+  /* -------------------------------------------------------- naming assignees at creation */
+
+  @Test
+  void creatingWithAssigneesNeedsTheSameGrantAsAddingThemAfterwards() {
+    // CREATE alone is not ASSIGNEES_MANAGE - naming co-workers at creation is not a way around the
+    // same supervisory check /assignees makes after the fact.
+    signedInAs(OWNER, Set.of(ProjectTaskPermissions.VIEW, ProjectTaskPermissions.CREATE));
+
+    assertThatThrownBy(() -> workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
+        "Install the unit", "On-site work.", ProjectTaskType.FIELD_VISIT, TaskPriority.MEDIUM,
+        ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.NONE, null, null,
+        null, DUE, null, null, null, null, null, null, null, List.of(MATE)), OWNER, "c"))
+        .isInstanceOf(ApiException.class)
+        .satisfies(e -> assertThat(((ApiException) e).status()).isEqualTo(HttpStatus.FORBIDDEN));
+  }
+
+  @Test
+  void creatingWithAssigneesPutsThemOnItAndLeavesAHistoryRowEach() {
+    signedInAs(OWNER, Set.of(ProjectTaskPermissions.VIEW, ProjectTaskPermissions.CREATE,
+        ProjectTaskPermissions.ASSIGNEES_MANAGE));
+
+    // The owner repeated in the list and a duplicate of MATE are both dropped rather than refused -
+    // a picker that does not bother excluding the owner should not turn a create into a conflict.
+    var created = workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest(
+        "Install the unit", "On-site work.", ProjectTaskType.FIELD_VISIT, TaskPriority.MEDIUM,
+        ProjectTaskVisibility.INDIVIDUAL, "Operations", OWNER, LinkedEntityType.NONE, null, null,
+        null, DUE, null, null, null, null, null, null, null,
+        List.of(MATE, OWNER, "  " + MATE + " ")), OWNER, "c");
+
+    assertThat(created.assignees()).extracting(ProjectTaskDtos.AssigneeResponse::username)
+        .containsExactly(MATE);
+    assertThat(created.history()).extracting(ProjectTaskDtos.HistoryResponse::action)
+        .contains("CREATED", "ASSIGNEE_ADDED");
+
+    signedInAs(MATE, WORKER);
+    assertThat(workItems.get(created.id(), MATE, WORKER).id()).isEqualTo(created.id());
   }
 
   /* ------------------------------------------------------------------------- the trail */

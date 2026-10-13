@@ -178,6 +178,10 @@ public class ProjectTaskService {
   @Transactional
   public ProjectTaskDetail create(CreateProjectTaskRequest request, String actor, String correlationId) {
     validate(request);
+    var permissions = ProjectTaskPermissions.granted();
+    List<String> assigneeUsernames = normalizeAssignees(request.assignees(), request.ownerUserId());
+    // Same supervisory check /assignees makes; routing through creation is not a way around it.
+    if (!assigneeUsernames.isEmpty()) requireAssigneeManagement(permissions);
     Instant now = clock.instant();
     String parentId = notBlank(request.parentTaskId()) ? request.parentTaskId().trim() : null;
     if (parentId != null) assertUsableParent(parentId, null);
@@ -203,13 +207,34 @@ public class ProjectTaskService {
     }
     // The one history row TM-016 exempts from needing a comment.
     task.addHistory("CREATED", actor, null, now, correlationId);
+    for (String username : assigneeUsernames) {
+      try {
+        task.addAssignee(username, actor, now);
+      } catch (IllegalArgumentException refused) {
+        throw ApiException.conflict(refused.getMessage());
+      }
+      task.addHistory("ASSIGNEE_ADDED", actor, username, now, correlationId);
+    }
     entityManager.persist(task);
     entityManager.flush();
     // Creating a task already assigned to somebody is an assignment, and the person it landed on is
     // the one who needs to know. Creating it unassigned announces nothing: an empty queue entry is
     // not news until somebody is accountable for it.
     announceAssignment(task, actor);
-    return detail(task, actor, ProjectTaskPermissions.granted());
+    return detail(task, actor, permissions);
+  }
+
+  /** Trims, drops blanks, dedupes case-insensitively, and excludes the owner (already on the item). */
+  private static List<String> normalizeAssignees(List<String> raw, String ownerUserId) {
+    if (raw == null || raw.isEmpty()) return List.of();
+    var seen = new java.util.LinkedHashMap<String, String>();
+    for (String candidate : raw) {
+      if (!notBlank(candidate)) continue;
+      String trimmed = candidate.trim();
+      if (ownerUserId != null && ownerUserId.trim().equalsIgnoreCase(trimmed)) continue;
+      seen.putIfAbsent(trimmed.toLowerCase(), trimmed);
+    }
+    return List.copyOf(seen.values());
   }
 
   /**
