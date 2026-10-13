@@ -395,7 +395,8 @@ class ProjectTaskEffortServiceTest {
     var child = workItems.create(new ProjectTaskDtos.CreateProjectTaskRequest("Stage one",
         "A stage of the parent.", ProjectTaskType.DELIVERABLE, TaskPriority.MEDIUM,
         ProjectTaskVisibility.RELEVANT_TEAM, "Operations", OWNER, LinkedEntityType.NONE, null, null,
-        "WRK-1", DUE, null, null, null, null, null, null, null, null), OWNER, "c");
+        "WRK-1", DUE, null, null, null, null, null, null, null,
+        null, false, null, null, null), OWNER, "c");
 
     // The cycle check needs the other rows in the table, so it is the service's to make - the
     // entity can only refuse a task that names itself.

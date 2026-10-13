@@ -198,4 +198,26 @@ class ProjectTaskEntityTest {
       assertThat(status.allowedNext()).as("allowed transitions from %s", status).isNotEmpty();
     }
   }
+
+  @Test
+  void completedAndSystemChecklistItemsCannotBeRemoved() {
+    var task = task();
+    var completed = task.addChecklistItem("Capture POD", true, ChecklistItemSource.MANUAL, NOW);
+    completed.complete("owner@orisenc.com", NOW);
+    assertThatThrownBy(() -> task.removeChecklistItem(completed)).hasMessageContaining("completed");
+
+    var system = task.addChecklistItem("Upload receipt", true, ChecklistItemSource.SYSTEM, NOW);
+    assertThatThrownBy(() -> task.removeChecklistItem(system)).hasMessageContaining("system evidence");
+  }
+
+  @Test
+  void anOpenManualChecklistItemCanBeEditedAndRemoved() {
+    var task = task();
+    var item = task.addChecklistItem("Draft", true, ChecklistItemSource.MANUAL, NOW);
+    task.editChecklistItem(item, "Send final", false);
+    assertThat(item.getTitle()).isEqualTo("Send final");
+    assertThat(item.isRequired()).isFalse();
+    task.removeChecklistItem(item);
+    assertThat(task.getChecklist()).isEmpty();
+  }
 }

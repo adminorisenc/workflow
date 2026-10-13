@@ -1,0 +1,76 @@
+# Builds this service's image (the Dockerfile runs the tests), pushes it to ACR and rolls it out on
+# orbit-vm. One-time setup and required secrets: docs/deployment.md in the orbit repository.
+name: Build and deploy
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-orbit-workflow
+  cancel-in-progress: false
+
+env:
+  SERVICE: workflow
+  IMAGE: orisencorbitacr.azurecr.io/orisenc/workflow
+  HEALTH_URL: https://orbit.orisenc.com/workflow-service/ws/public/health/workflow
+  RESOURCE_GROUP: orbit-vm_group
+  VM_NAME: orbit-vm
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - run: az acr login --name orisencorbitacr
+
+      - name: Build (runs the tests) and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          secrets: |
+            github_actor=${{ secrets.GPR_USER }}
+            github_token=${{ secrets.GPR_TOKEN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy to orbit-vm
+        run: |
+          token=$(az acr login --name orisencorbitacr --expose-token --query accessToken -o tsv)
+          name="deploy-$SERVICE-$GITHUB_RUN_ID"
+          az vm run-command create -g "$RESOURCE_GROUP" --vm-name "$VM_NAME" --name "$name" \
+            --script "$(cat .github/deploy/orbit-vm-deploy.sh)" \
+            --parameters SERVICE="$SERVICE" IMAGE_TAG="$GITHUB_SHA" \
+            --protected-parameters ACR_TOKEN="$token" \
+            --timeout-in-seconds 900 --async-execution false -o none
+          az vm run-command show -g "$RESOURCE_GROUP" --vm-name "$VM_NAME" --name "$name" --instance-view \
+            --query "instanceView.{exit:exitCode,out:output,err:error}" -o json > result.json
+          az vm run-command delete -g "$RESOURCE_GROUP" --vm-name "$VM_NAME" --name "$name" --yes -o none
+          jq -r '.out' result.json
+          if [ "$(jq -r '.exit' result.json)" != "0" ]; then jq -r '.err' result.json; exit 1; fi
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -m 5 "$HEALTH_URL" | grep -q '"status":"UP"'; then echo "$SERVICE is UP"; exit 0; fi
+            sleep 10
+          done
+          echo "$SERVICE did not report UP at $HEALTH_URL"
+          exit 1

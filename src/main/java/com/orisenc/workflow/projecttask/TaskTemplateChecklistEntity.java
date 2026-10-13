@@ -1,0 +1,3 @@
+package com.orisenc.workflow.projecttask;
+import jakarta.persistence.*;
+@Entity @Table(name="task_template_checklist") public class TaskTemplateChecklistEntity { @Id @GeneratedValue(strategy=GenerationType.IDENTITY) Long id; @ManyToOne(fetch=FetchType.LAZY) @JoinColumn(name="template_id",nullable=false) TaskTemplateEntity template; @Column(name="sequence_no",nullable=false) int sequenceNo; @Column(nullable=false,length=200) String title; @Column(nullable=false) boolean required; protected TaskTemplateChecklistEntity(){} TaskTemplateChecklistEntity(TaskTemplateEntity t,int n,String s,boolean r){template=t;sequenceNo=n;title=s;required=r;} public String getTitle(){return title;} public boolean isRequired(){return required;} }

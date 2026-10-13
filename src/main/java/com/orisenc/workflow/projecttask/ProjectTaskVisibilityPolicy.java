@@ -89,6 +89,7 @@ public final class ProjectTaskVisibilityPolicy {
     if (!permissions.contains(ProjectTaskPermissions.VIEW)) return false;
     if (isOwnerOrCreator(task, actor)) return true;
     if (task.isAssignee(actor)) return true;
+    if (task.isFollower(actor)) return true;
     if (coveredBy(task, cover)) return true;
     return switch (task.getVisibility()) {
       case ALL_TEAMS -> true;
@@ -265,6 +266,8 @@ public final class ProjectTaskVisibilityPolicy {
     // so an item with several assignees is still one row in the result.
     clauses.add("exists (select 1 from ProjectTaskAssigneeEntity a"
         + " where a.task = t and lower(a.username) = :actor)");
+    clauses.add("exists (select 1 from ProjectTaskFollowerEntity f"
+        + " where f.task = t and lower(f.username) = :actor)");
     clauses.add("t.visibility = com.orisenc.workflow.projecttask.ProjectTaskVisibility.ALL_TEAMS");
     parameters.put("actor", actor == null ? "" : actor.toLowerCase(java.util.Locale.ROOT));
     if (permissions.contains(ProjectTaskPermissions.VIEW_TEAM))
@@ -295,6 +298,14 @@ public final class ProjectTaskVisibilityPolicy {
     return cover.stream()
         .anyMatch(entry -> entry.isFor(task.getOwnerUserId())
             && entry.covers(task.getTaskType().name(), task.getRelevantTeam()));
+  }
+
+  public static boolean mayAddSubtasks(ProjectTaskEntity task, String actor, Set<String> permissions,
+      List<DelegationCover> cover) {
+    return task.open() && mayView(task, actor, permissions, cover)
+        && (permissions.contains(ProjectTaskPermissions.MANAGE)
+            || (permissions.contains(ProjectTaskPermissions.EXECUTE)
+                && (isOwner(task, actor) || coveredBy(task, cover))));
   }
 
   private static boolean isOwner(ProjectTaskEntity task, String actor) {

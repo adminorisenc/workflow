@@ -16,6 +16,8 @@ dependencies {
   implementation 'com.orisenc:orisenc-security-spring-boot-starter:1.2.1'
 
   implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+  implementation 'org.flywaydb:flyway-core'
+  runtimeOnly 'org.flywaydb:flyway-database-postgresql'
   runtimeOnly 'org.postgresql:postgresql'
 
   testImplementation 'org.springframework.boot:spring-boot-starter-test'
