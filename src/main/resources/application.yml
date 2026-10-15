@@ -28,6 +28,9 @@ server:
     context-path: /workflow-service/ws
 
 orisenc:
+  order-tech:
+    hr-url: ${ORISENC_ORDER_TECH_HR_URL:http://localhost:8086/hr-service/ws}
+    hr-scope: ${ORISENC_ORDER_TECH_HR_SCOPE:}
   security:
     tenant-id: ${ORISENC_TENANT_ID:}
     client-id: ${ORISENC_CLIENT_ID:}
