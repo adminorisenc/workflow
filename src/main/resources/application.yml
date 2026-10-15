@@ -30,19 +30,19 @@ server:
 orisenc:
   order-tech:
     hr-url: ${ORISENC_ORDER_TECH_HR_URL:http://localhost:8086/hr-service/ws}
-    hr-scope: ${ORISENC_ORDER_TECH_HR_SCOPE:}
+    hr-scope: ${WORKFLOW_HR_SCOPE:}
   security:
-    tenant-id: ${ORISENC_TENANT_ID:}
-    client-id: ${ORISENC_CLIENT_ID:}
+    tenant-id: ${ENTRA_TENANT_ID:}
+    client-id: ${WORKFLOW_CLIENT_ID:}
     authority: https://login.microsoftonline.com
     allowed-clock-skew: 60s
     allowed-origins:
       - http://localhost:3000
   authorization:
-    base-url: ${ORISENC_AUTHORIZATION_BASE_URL:http://localhost:8080/common-platform-service/ws}
-    client-id: ${ORISENC_AUTHORIZATION_CLIENT_ID:}
-    client-secret: ${ORISENC_AUTHORIZATION_CLIENT_SECRET:}
-    scope: ${ORISENC_AUTHORIZATION_SCOPE:}
+    base-url: ${COMMON_PLATFORM_URL:http://localhost:8080/common-platform-service/ws}
+    client-id: ${WORKFLOW_DAEMON_CLIENT_ID:${WORKFLOW_CLIENT_ID:}}
+    client-secret: ${WORKFLOW_CLIENT_SECRET:}
+    scope: ${COMMON_PLATFORM_SCOPE:}
     cache-ttl: 5m
 
   # Workflow raises notifications; it never delivers one. Disabled until an operator supplies a
@@ -52,12 +52,12 @@ orisenc:
   integration-client:
     enabled: ${ORISENC_INTEGRATION_CLIENT_ENABLED:false}
     base-url: ${ORISENC_INTEGRATION_BASE_URL:http://localhost:8088/integration-service/ws}
-    client-id: ${ORISENC_CLIENT_ID:}
+    client-id: ${WORKFLOW_CLIENT_ID:}
     # Workflow's own application secret. It may be the same secret used for authorization
     # resolution, but it is named separately so deployments can rotate it independently.
-    client-secret: ${ORISENC_INTEGRATION_CLIENT_SECRET:${ORISENC_AUTHORIZATION_CLIENT_SECRET:}}
+    client-secret: ${WORKFLOW_INTEGRATION_CLIENT_SECRET:${WORKFLOW_CLIENT_SECRET:}}
     # The Integration Service's application ID URI plus /.default.
-    scope: ${ORISENC_INTEGRATION_SCOPE:}
+    scope: ${WORKFLOW_INTEGRATION_SCOPE:}
     request-timeout: ${ORISENC_INTEGRATION_REQUEST_TIMEOUT:10s}
 
   workflow:

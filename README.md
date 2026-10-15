@@ -14,13 +14,13 @@ Create an empty database named `workflow`, then supply database and Entra values
 variables:
 
 - `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`
-- `ORISENC_TENANT_ID`, `ORISENC_CLIENT_ID`
-- `ORISENC_AUTHORIZATION_BASE_URL` when Common Platform is not at its local default
+- `ENTRA_TENANT_ID`, `WORKFLOW_CLIENT_ID`
+- `COMMON_PLATFORM_URL` when Common Platform is not at its local default
 
 To let the SLA pass actually reach anybody, also point it at the Integration Service:
 
 - `ORISENC_INTEGRATION_CLIENT_ENABLED=true`, `ORISENC_INTEGRATION_BASE_URL`,
-  `ORISENC_INTEGRATION_SCOPE`, `ORISENC_INTEGRATION_CLIENT_SECRET`
+  `WORKFLOW_INTEGRATION_SCOPE`, `WORKFLOW_INTEGRATION_CLIENT_SECRET`
 
 Without them the client is absent, and the pass records that it could not run rather than stamping
 escalations nobody was told about.
