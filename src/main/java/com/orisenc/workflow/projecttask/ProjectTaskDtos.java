@@ -30,7 +30,13 @@ public final class ProjectTaskDtos {
       /* TM-A02 and TM-A01. All three optional at creation and editable afterwards. */
       String summary, Instant plannedStartAt, Instant plannedEndAt,
       List<SubtaskInput> subtasks, boolean subtasksMandatory, Long subtasksFromTemplateId,
-      List<String> followers) {
+      List<String> followers,
+      /*
+       * People working this item alongside its owner, named at creation instead of added one at a
+       * time afterwards through /assignees. Requires ASSIGNEES_MANAGE, same as that endpoint - naming
+       * co-workers here is the same supervisory decision, just made at creation time.
+       */
+      List<String> assignees) {
     public CreateProjectTaskRequest(String title, String description, ProjectTaskType taskType,
         TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam, String ownerUserId,
         LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
@@ -39,7 +45,8 @@ public final class ProjectTaskDtos {
         Instant plannedStartAt, Instant plannedEndAt) {
       this(title, description, taskType, priority, visibility, relevantTeam, ownerUserId,
           linkedEntityType, linkedEntityId, linkedEntityRef, parentTaskId, dueAt, checklist,
-          organizationId, customerId, vendorId, summary, plannedStartAt, plannedEndAt, null, false, null, null);
+          organizationId, customerId, vendorId, summary, plannedStartAt, plannedEndAt,
+          null, false, null, null, null);
     }
     public CreateProjectTaskRequest(String title, String description, ProjectTaskType taskType,
         TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam, String ownerUserId,
@@ -51,7 +58,20 @@ public final class ProjectTaskDtos {
       this(title, description, taskType, priority, visibility, relevantTeam, ownerUserId, linkedEntityType,
           linkedEntityId, linkedEntityRef, parentTaskId, dueAt, checklist, organizationId, customerId,
           vendorId, summary, plannedStartAt, plannedEndAt, subtasks, subtasksMandatory,
-          subtasksFromTemplateId, null);
+          subtasksFromTemplateId, null, null);
+    }
+    /** The shape before {@code assignees} existed, through {@code followers}. */
+    public CreateProjectTaskRequest(String title, String description, ProjectTaskType taskType,
+        TaskPriority priority, ProjectTaskVisibility visibility, String relevantTeam, String ownerUserId,
+        LinkedEntityType linkedEntityType, String linkedEntityId, String linkedEntityRef,
+        String parentTaskId, Instant dueAt, List<ChecklistItemInput> checklist,
+        Long organizationId, Long customerId, Long vendorId, String summary,
+        Instant plannedStartAt, Instant plannedEndAt, List<SubtaskInput> subtasks,
+        boolean subtasksMandatory, Long subtasksFromTemplateId, List<String> followers) {
+      this(title, description, taskType, priority, visibility, relevantTeam, ownerUserId, linkedEntityType,
+          linkedEntityId, linkedEntityRef, parentTaskId, dueAt, checklist, organizationId, customerId,
+          vendorId, summary, plannedStartAt, plannedEndAt, subtasks, subtasksMandatory,
+          subtasksFromTemplateId, followers, null);
     }
   }
 
