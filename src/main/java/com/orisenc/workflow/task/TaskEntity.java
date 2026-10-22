@@ -32,7 +32,8 @@ public class TaskEntity {
   @Column(nullable = false, length = 2000) private String summary;
   @Column(length = 100) private String requestValue;
   @Column(nullable = false) private Instant createdAt;
-  @Column(name = "due_at", nullable = false) private Instant dueAt;
+  // Nullable since V4: an OPS margin approval has no due date (owner decision, 22 Oct 2026).
+  @Column(name = "due_at") private Instant dueAt;
   private Instant completedAt;
   /**
    * The highest SLA rung already raised for this approval - see {@code com.orisenc.workflow.sla}.
@@ -81,7 +82,8 @@ public class TaskEntity {
     escalationLevel = level;
     addHistory("SLA_ESCALATED", SLA_ACTOR, note, time, correlationId);
   }
-  public void transition(TaskStatus newStatus, Instant time) { status = newStatus; if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.REJECTED) completedAt = time; }
+  public void transition(TaskStatus newStatus, Instant time) { status = newStatus; if (newStatus == TaskStatus.COMPLETED || newStatus == TaskStatus.REJECTED || newStatus == TaskStatus.CANCELLED) completedAt = time; }
+  public boolean isClosed() { return status == TaskStatus.COMPLETED || status == TaskStatus.REJECTED || status == TaskStatus.CANCELLED; }
   public String getId(){return id;} public long getVersion(){return version;} public Long getOrganizationId(){return organizationId;}
   public Long getCustomerId(){return customerId;} public Long getVendorId(){return vendorId;} public String getTitle(){return title;}
   public String getReference(){return reference;} public String getDepartment(){return department;} public TaskType getType(){return type;}

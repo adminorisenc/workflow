@@ -49,12 +49,20 @@ public class TaskService {
         .filter(t -> assignee == null || assignee.isBlank() || assignee.equalsIgnoreCase(t.getAssignee()))
         .filter(t -> q.isEmpty() || (t.getId() + " " + t.getTitle() + " " + t.getReference() + " " + t.getRequester())
             .toLowerCase(Locale.ROOT).contains(q))
+        .filter(TaskService::visible)
         .map(t -> response(t, false)).toList();
   }
 
   @Transactional(readOnly = true)
   public TaskResponse get(String id) {
-    return response(required(id), true);
+    var task = required(id);
+    if (!visible(task)) throw ApiException.notFound("Task not found");
+    return response(task, true);
+  }
+
+  /** OPS margin approvals carry order financials, so only margin approvers see them (404, not 403, otherwise). */
+  static boolean visible(TaskEntity task) {
+    return !OpsMarginTaskService.isMarginTask(task) || OpsMarginTaskService.callerMayApprove();
   }
 
   @Transactional
@@ -79,9 +87,13 @@ public class TaskService {
     if (request == null || request.action() == null) throw ApiException.badRequest("An action is required");
     if (request.expectedVersion() == null) throw ApiException.badRequest("expectedVersion is required");
     var task = required(id);
+    if (!visible(task)) throw ApiException.notFound("Task not found");
+    // OPS owns a margin decision; the task closes only when OPS reports it.
+    if (OpsMarginTaskService.isMarginTask(task))
+      throw ApiException.badRequest("Decide this margin with Approve or Reject on the margin task.");
     if (task.getVersion() != request.expectedVersion())
       throw ApiException.conflict("Task was changed; reload and retry");
-    if (task.getStatus() == TaskStatus.COMPLETED || task.getStatus() == TaskStatus.REJECTED)
+    if (task.isClosed())
       throw ApiException.conflict("Task is already closed");
     // Checked here rather than left to the database: the comment column is 500 characters, and
     // without this a longer comment fails as a constraint violation - a 500 on an approval decision
@@ -212,6 +224,6 @@ public class TaskService {
     return new TaskResponse(task.getId(), task.getVersion(), task.getTitle(), task.getReference(), task.getDepartment(),
         task.getType(), task.getPriority(), task.getStatus(), task.getRequester(), task.getAssignee(),
         task.getSummary(), task.getRequestValue(), task.getCreatedAt(), task.getDueAt(), task.getCompletedAt(),
-        task.getCompletedAt() == null && task.getDueAt().isBefore(clock.instant()), events);
+        task.getCompletedAt() == null && task.getDueAt() != null && task.getDueAt().isBefore(clock.instant()), events);
   }
 }

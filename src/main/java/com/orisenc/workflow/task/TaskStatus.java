@@ -1,3 +1,4 @@
 package com.orisenc.workflow.task;
 
-public enum TaskStatus { PENDING, IN_PROGRESS, COMPLETED, REJECTED }
+// CANCELLED: closed because the source withdrew the request (an OPS margin invalidated), not decided.
+public enum TaskStatus { PENDING, IN_PROGRESS, COMPLETED, REJECTED, CANCELLED }
