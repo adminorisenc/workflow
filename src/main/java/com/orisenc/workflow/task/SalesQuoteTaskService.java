@@ -38,7 +38,7 @@ public class SalesQuoteTaskService {
     if(c==null||c.quoteId()==null||c.quoteId()<=0||c.round()==null||c.round()<=0||!Objects.equals(c.requestKey(),requestKey(c.quoteId(),c.round())))
       throw ApiException.badRequest("A stable Sales quote approval identity is required.");
     text(c.quoteCode(),40,"Quote code");text(c.requestedBy(),200,"Requester");text(c.ownerUserId(),200,"Quote owner");
-    if(c.currency()==null||!c.currency().matches("[A-Z]{3}")||c.grandTotal()==null)
+    if(!"INR".equals(c.currency())||c.grandTotal()==null)
       throw ApiException.badRequest("The quote figures are required.");
     String hash=hash(c);
     var previous=em.find(SalesQuoteTaskEntity.class,c.requestKey(),LockModeType.PESSIMISTIC_WRITE);

@@ -114,7 +114,7 @@ public class ProjectTaskTravelEntryEntity {
     BigDecimal amount = expenseAmount == null ? BigDecimal.ZERO : expenseAmount;
     if (amount.signum() < 0) throw new IllegalArgumentException("An expense cannot be negative.");
     this.expenseAmount = amount.setScale(2, java.math.RoundingMode.HALF_UP);
-    this.currencyCode = currency(currencyCode);
+    this.currencyCode = currency(currencyCode == null ? this.currencyCode : currencyCode);
     this.voucherRef = optionalText(voucherRef, 80);
   }
 
@@ -128,8 +128,8 @@ public class ProjectTaskTravelEntryEntity {
   private static String currency(String value) {
     if (value == null || value.isBlank()) return DEFAULT_CURRENCY;
     String code = value.trim().toUpperCase(java.util.Locale.ROOT);
-    if (code.length() != 3 || !code.chars().allMatch(Character::isLetter))
-      throw new IllegalArgumentException("A currency code must be three letters, such as INR.");
+    if (!DEFAULT_CURRENCY.equals(code))
+      throw new IllegalArgumentException("Orbit supports INR only.");
     return code;
   }
 

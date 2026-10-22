@@ -12,6 +12,15 @@ import org.junit.jupiter.api.Test;
 /** DB-free coverage of the work item lifecycle, which is where the audit rules actually live. */
 class ProjectTaskEntityTest {
 
+  @Test void travelExpensesRefuseForeignCurrency() {
+    assertThatThrownBy(()->new ProjectTaskTravelEntryEntity(task(),"traveller",java.time.LocalDate.now(),
+        "Chennai","Madurai","Visit",30,java.math.BigDecimal.TEN,"USD",null,"traveller",NOW))
+        .hasMessageContaining("INR only");
+    var entry=new ProjectTaskTravelEntryEntity(task(),"traveller",java.time.LocalDate.now(),
+        "Chennai","Madurai","Visit",30,java.math.BigDecimal.TEN,"inr",null,"traveller",NOW);
+    assertThat(entry.getCurrencyCode()).isEqualTo("INR");
+  }
+
   private static final Instant NOW = Instant.parse("2026-08-28T09:00:00Z");
 
   private ProjectTaskEntity task() {
