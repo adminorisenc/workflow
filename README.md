@@ -34,6 +34,9 @@ Run `./gradlew bootRun`. The defaults are:
 
 ## API
 
+Sales quote approval tasks use the [Sales quote approval contract](docs/SALES_QUOTE_APPROVAL_TASK_CONTRACT.md).
+Sales owns decisions; Workflow supplies the shared inbox, source binding and ordered state projection.
+
 | Method | Path | Permission |
 | --- | --- | --- |
 | `GET` | `/api/tasks`, `/api/tasks/{id}` | `platform.task.view` |
@@ -125,3 +128,6 @@ The hourly expiry pass closes elapsed windows idempotently. Lifecycle notificati
 after commit through the Integration Service (`DELEGATION_ACTIVE` to the delegate;
 `DELEGATION_ENDED` to both parties, excluding the actor). History for both task families carries the
 real `actor` plus additive `onBehalfOf` when somebody acts as a delegate.
+
+
+Margin approval is disabled by owner decision on 22 October 2026. The OPS margin controller and service are unregistered, legacy margin tasks are hidden and generic actions refuse them. Historical rows and migrations remain intact. Sales quote approval stays active.

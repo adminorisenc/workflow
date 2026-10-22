@@ -1,5 +1,8 @@
 # OPS margin approval task contract
 
+Owner decision, 22 October 2026: margin approval is disabled; its implementation is retained in comments or unregistered components. Sales quote approval remains active. Vendor comparison, current margin calculations and Operations accept/return remain active. Historical margin evaluations and tasks are retained; legacy margin tasks are hidden and cannot be acted on. Applied migrations remain unchanged; Common Platform V17 revokes margin grants. The margin-approval design below is historical and superseded by this decision.
+
+
 **Implemented 22 October 2026 with the owner's answers to §5:** the browser sends the TL's decision to
 OPS with the TL's own OPS token (no OBO); the task is unassigned and open to every holder of
 `operations.margin.approve`; no due date; invalidation closes the task as the new `CANCELLED` status.

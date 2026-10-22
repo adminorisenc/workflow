@@ -60,9 +60,9 @@ public class TaskService {
     return response(task, true);
   }
 
-  /** OPS margin approvals carry order financials, so only margin approvers see them (404, not 403, otherwise). */
+  /** Source-owned approvals carry commercial figures, so only their approvers see them (404, not 403, otherwise). */
   static boolean visible(TaskEntity task) {
-    return !OpsMarginTaskService.isMarginTask(task) || OpsMarginTaskService.callerMayApprove();
+    return SourceApprovals.visible(task);
   }
 
   @Transactional
@@ -88,9 +88,9 @@ public class TaskService {
     if (request.expectedVersion() == null) throw ApiException.badRequest("expectedVersion is required");
     var task = required(id);
     if (!visible(task)) throw ApiException.notFound("Task not found");
-    // OPS owns a margin decision; the task closes only when OPS reports it.
-    if (OpsMarginTaskService.isMarginTask(task))
-      throw ApiException.badRequest("Decide this margin with Approve or Reject on the margin task.");
+    // The source service owns the decision; the task closes only when that service reports it.
+    var source = SourceApprovals.of(task);
+    if (source.isPresent()) throw ApiException.badRequest(source.get().refusal());
     if (task.getVersion() != request.expectedVersion())
       throw ApiException.conflict("Task was changed; reload and retry");
     if (task.isClosed())

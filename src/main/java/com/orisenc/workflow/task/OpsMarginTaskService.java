@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orisenc.workflow.api.ApiException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.LockModeType;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
@@ -18,7 +17,7 @@ import java.util.*;
  * open to every holder of operations.margin.approve, has no due date, and is never decided here: the
  * browser sends the TL's decision to OPS with the TL's own token, and OPS's state message closes the task.
  */
-@Service
+// @Service // Margin approval disabled by owner decision, 22 Oct 2026.
 public class OpsMarginTaskService {
   static final String PREFIX = "ops-margin-";
   static final String APPROVE_PERMISSION = "operations.margin.approve";
@@ -33,10 +32,7 @@ public class OpsMarginTaskService {
   public record Binding(String taskId,Long orderId,Long marginId,Long revisionId,Long marginVersion,String orderNumber,String sourceStatus) {}
 
   static boolean isMarginTask(TaskEntity task) {return task.getReference()!=null&&task.getReference().startsWith(PREFIX);}
-  static boolean callerMayApprove() {
-    var auth=SecurityContextHolder.getContext().getAuthentication();
-    return auth!=null&&auth.getAuthorities().stream().anyMatch(a->APPROVE_PERMISSION.equals(a.getAuthority()));
-  }
+  static boolean callerMayApprove() {return SourceApprovals.callerHolds(APPROVE_PERMISSION);}
 
   @Transactional
   public Result intake(Intake c,String serviceActor) {
